@@ -9,6 +9,8 @@ import re
 import json
 import shutil
 import traceback
+import zipfile
+import xml.etree.ElementTree as ET
 
 from kivy.app import App
 from kivy.metrics import dp
@@ -23,14 +25,9 @@ from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.gridlayout import GridLayout
 
-try:
-    from docx import Document
-    DOCX_AVAILABLE = True
-    DOCX_ERROR = ""
-except Exception as exc:
-    Document = None
-    DOCX_AVAILABLE = False
-    DOCX_ERROR = str(exc)
+# DOCX support uses the Python standard library; no lxml/native build needed.
+DOCX_AVAILABLE = True
+DOCX_ERROR = ""
 
 Window.clearcolor = get_color_from_hex("#08111F")
 
@@ -156,43 +153,69 @@ def alias_map():
     return sorted(result, key=lambda pair: len(pair[0]), reverse=True)
 
 
+def _docx_blocks(path):
+    if not zipfile.is_zipfile(path):
+        raise ValueError("Fayl düzgün DOCX sənədi deyil.")
+    with zipfile.ZipFile(path, "r") as z:
+        try:
+            root = ET.fromstring(z.read("word/document.xml"))
+        except KeyError:
+            raise ValueError("DOCX sənədinin məzmunu tapılmadı.")
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    body = root.find("w:body", ns)
+    blocks = []
+    if body is None:
+        return blocks
+
+    def ptext(p):
+        return "".join((n.text or "") for n in p.findall(".//w:t", ns)).strip()
+
+    for node in list(body):
+        tag = node.tag.rsplit("}", 1)[-1]
+        if tag == "p":
+            text = ptext(node)
+            if text:
+                blocks.append(("paragraph", text))
+        elif tag == "tbl":
+            rows = []
+            for tr in node.findall("w:tr", ns):
+                cells = []
+                for tc in tr.findall("w:tc", ns):
+                    cells.append(" ".join(filter(None, [ptext(x) for x in tc.findall(".//w:p", ns)])).strip())
+                rows.append(cells)
+            blocks.append(("table", rows))
+    return blocks
+
+
 def parse_docx(path):
-    if not DOCX_AVAILABLE:
-        raise RuntimeError("Word dəstəyi yoxdur. buildozer.spec-də python-docx əlavə edin. " + DOCX_ERROR[:120])
-    doc = Document(path)
     found = {}
     aliases = alias_map()
 
     def match_label(text):
-        label = re.sub(r"^\d+[\.\)]\s*", "", normalise(text))
+        label = re.sub(r"^\d+[\.)]\s*", "", normalise(text))
         for alias, key in aliases:
             if label == alias:
                 return key
         return None
 
-    for table in doc.tables:
-        for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells]
-            for i, raw in enumerate(cells):
-                if not raw:
-                    continue
-                label, value = raw, ""
-                if ":" in raw:
-                    label, value = raw.split(":", 1)
-                    value = value.strip()
-                key = match_label(label)
-                if key:
-                    if not value:
-                        for candidate in cells[i + 1:]:
-                            if candidate.strip():
-                                value = candidate.strip()
-                                break
-                    if value:
-                        found[key] = value
-
-    for paragraph in doc.paragraphs:
-        if ":" in paragraph.text:
-            label, value = paragraph.text.split(":", 1)
+    for kind, content in _docx_blocks(path):
+        if kind == "table":
+            for cells in content:
+                for i, raw in enumerate(cells):
+                    if not raw:
+                        continue
+                    label, value = raw, ""
+                    if ":" in raw:
+                        label, value = raw.split(":", 1)
+                        value = value.strip()
+                    key = match_label(label)
+                    if key:
+                        if not value:
+                            value = next((x.strip() for x in cells[i + 1:] if x.strip()), "")
+                        if value:
+                            found[key] = value
+        elif ":" in content:
+            label, value = content.split(":", 1)
             key = match_label(label)
             if key and value.strip():
                 found[key] = value.strip()
@@ -205,6 +228,47 @@ def parse_docx(path):
     found.setdefault("tabor", "Kursant hazırlıq")
     found.setdefault("boluk", "3-cü kursant")
     return found
+
+
+def _xml_escape(value):
+    return (str(value or "").replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def write_docx(path, title, rows):
+    """Write a basic Office Open XML document without python-docx/lxml."""
+    def para(text, title_style=False):
+        ppr = '<w:pPr><w:pStyle w:val="Title"/></w:pPr>' if title_style else ""
+        return '<w:p>' + ppr + '<w:r><w:t xml:space="preserve">' + _xml_escape(text) + '</w:t></w:r></w:p>'
+
+    tr = ['<w:tr><w:tc><w:p><w:r><w:t>Parametr</w:t></w:r></w:p></w:tc>'
+          '<w:tc><w:p><w:r><w:t>Məlumat</w:t></w:r></w:p></w:tc></w:tr>']
+    for label, value in rows:
+        tr.append('<w:tr><w:tc>' + para(label) + '</w:tc><w:tc>' + para(value) + '</w:tc></w:tr>')
+
+    docxml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+      + para(title, True) + '<w:tbl><w:tblPr><w:tblBorders>'
+      + ''.join(f'<w:{edge} w:val="single" w:sz="4" w:space="0" w:color="808080"/>'
+                for edge in ("top","left","bottom","right","insideH","insideV"))
+      + '</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="4500"/><w:gridCol w:w="4500"/></w:tblGrid>'
+      + ''.join(tr) + '</w:tbl><w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+      '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>'
+      '</w:body></w:document>')
+    content_types = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      '<Default Extension="xml" ContentType="application/xml"/>'
+      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      '</Types>')
+    rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+      '</Relationships>')
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", content_types)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", docxml)
 
 
 # -------- Android native document picker (SAF), with multi-select --------
@@ -646,32 +710,21 @@ class Detail(Screen):
         self.status.text = ""
 
     def export(self, *_):
-        if not DOCX_AVAILABLE:
-            self.status.color = get_color_from_hex(RED)
-            self.status.text = "Word kitabxanası yoxdur: " + DOCX_ERROR[:120]
-            return
         try:
-            doc = Document()
-            doc.add_heading("ARAYIŞ-MƏRUZƏ", 0)
-            table = doc.add_table(rows=1, cols=2)
-            table.style = "Table Grid"
-            table.rows[0].cells[0].text = "Parametr"
-            table.rows[0].cells[1].text = "Məlumat"
-            for key, value in self.person.items():
-                cells = table.add_row().cells
-                cells[0].text = DISPLAY_LABELS.get(key, key)
-                cells[1].text = str(value or "")
             folder = os.path.join(App.get_running_app().user_data_dir, "Arayislar")
             os.makedirs(folder, exist_ok=True)
             surname = re.sub(r"[^A-Za-z0-9_-]+", "_",
                              str(self.person.get("soyadi", "Kursant"))).strip("_") or "Kursant"
             path = os.path.join(folder, "Arayis_" + surname + ".docx")
-            doc.save(path)
+            rows = [(DISPLAY_LABELS.get(key, key), str(value or ""))
+                    for key, value in self.person.items()]
+            write_docx(path, "ARAYIŞ-MƏRUZƏ", rows)
             self.status.color = get_color_from_hex(GREEN)
             self.status.text = "Word faylı tətbiqin şəxsi Arayislar qovluğunda yaradıldı."
         except Exception as exc:
             self.status.color = get_color_from_hex(RED)
             self.status.text = "Word yaratma xətası: " + str(exc)[:150]
+
 
 
 class AAHMApp(App):
