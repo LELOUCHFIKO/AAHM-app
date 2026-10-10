@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -30,6 +30,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
 
       - name: Install system dependencies
         run: |
@@ -54,19 +55,41 @@ jobs:
           path: |
             .buildozer
             ~/.buildozer
-          key: aahm-build-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          key: aahm-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
-            aahm-build-${{ runner.os }}-
+            aahm-${{ runner.os }}-
+
+      - name: Show Android configuration
+        run: |
+          grep -nE '^(requirements|android.api|android.minapi|android.ndk|android.ndk_api|p4a.branch)' buildozer.spec || true
 
       - name: Build debug APK
+        id: apk
+        continue-on-error: true
         env:
           BUILDOZER_WARN_ON_ROOT: '0'
         run: |
-          buildozer -v android debug
+          set -o pipefail
+          buildozer -v android debug 2>&1 | tee build.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AAHM-build-log
+          path: build.log
+          if-no-files-found: ignore
 
       - name: Upload APK
+        if: steps.apk.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: AAHM-debug-apk
           path: bin/*.apk
           if-no-files-found: error
+
+      - name: Report build failure
+        if: steps.apk.outcome != 'success'
+        run: |
+          echo "APK build failed. Download the AAHM-build-log artifact."
+          exit 1
