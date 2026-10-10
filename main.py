@@ -1,336 +1,814 @@
-import json
+# -*- coding: utf-8 -*-
 import os
+import re
+import json
+import traceback
+
 from kivy.app import App
+from kivy.metrics import dp
+from kivy.utils import get_color_from_hex
+from kivy.core.window import Window
+from kivy.graphics import Color, RoundedRectangle
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
-from kivy.uix.image import Image
 from kivy.uix.textinput import TextInput
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.gridlayout import GridLayout
-from kivy.graphics import Color, Rectangle
-from docx import Document
+from kivy.uix.filechooser import FileChooserListView
 
-DATA_FILE = 'kursantlar.json'
+# Optional import: a missing docx dependency must not stop the app launching.
+try:
+    from docx import Document
+    DOCX_AVAILABLE = True
+    DOCX_ERROR = ""
+except Exception as exc:
+    Document = None
+    DOCX_AVAILABLE = False
+    DOCX_ERROR = str(exc)
+
+Window.clearcolor = get_color_from_hex("#08111F")
+
+BG = "#08111F"
+PANEL = "#111F33"
+PANEL2 = "#192B43"
+WHITE = "#F4F7FB"
+MUTED = "#9EADC1"
+GOLD = "#E5B85C"
+GREEN = "#2E9B72"
+RED = "#D85C62"
+
+
+# -------------------- DATA STORAGE --------------------
+
+def data_path():
+    """Save data in the app's private folder, not the current working directory."""
+    folder = App.get_running_app().user_data_dir
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, "kursantlar.json")
+
 
 def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return [
-        {
-            "adi": "Elvin", "soyadi": "Məmmədov", "ata_adi": "Rəhim",
-            "dogum_tarixi": "12.05.2005", "fin": "1234567",
-            "kurs": "Hazırlıq kursu", "tabor": "Kursant hazırlıq",
-            "boluk": "3-cü kursant", "elaqe": "+994501234567",
-            "qan_qrupu": "II (A) Rh+", "ata": "Rəhim Məmmədov", "ana": "Nərmin Məmmədova"
-        }
-    ]
+    try:
+        path = data_path()
+        if not os.path.exists(path):
+            return []
+        with open(path, "r", encoding="utf-8") as file:
+            result = json.load(file)
+        return result if isinstance(result, list) else []
+    except Exception:
+        return []
+
 
 def save_data(data):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+    path = data_path()
+    temp_path = path + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+    os.replace(temp_path, path)
 
-# Arxa fon rəngi üçün köməkçi sinif
-class BackgroundBoxLayout(BoxLayout):
-    def __init__(self, bg_color=(0.08, 0.12, 0.18, 1), **kwargs):
-        super(BackgroundBoxLayout, self).__init__(**kwargs)
+
+# -------------------- FORM FIELDS --------------------
+
+# Display label, internal key, possible labels in a Word document.
+FIELDS = [
+    ("Adı", "adi", ["adı", "adi"]),
+    ("Soyadı", "soyadi", ["soyadı", "soyadi"]),
+    ("Ata adı", "ata_adi", ["ata adı", "ata adi"]),
+    ("Doğum tarixi", "dogum_tarixi",
+     ["doğulduğu tarix gün,ay,il", "doğulduğu tarix", "doğum tarixi"]),
+    ("Vəsiqə seriya və FIN kodu", "fin",
+     ["vəsiqə seriya və fin kodu", "vəsiqə seriya və fin", "fin kodu", "fin"]),
+    ("Ümumvətəndaş pasportu", "pasport", ["ümumvətəndaş pasport"]),
+    ("Doğulduğu yer", "doguldugu_yer", ["doğulduğu yer"]),
+    ("Yaşayış yeri", "yasayis_yeri", ["yaşayış yeri"]),
+    ("Qeydiyyat ünvanı", "qeydiyyat_unvani",
+     ["qeydiyyatda olduğu ünvan"]),
+    ("Qoşun növü", "qosun_novu", ["qoşun növü"]),
+    ("Mülki ixtisas", "ixtisas", ["mülki ixtisas"]),
+    ("İntizam balı", "intizam_bali", ["intizam balı"]),
+    ("Tədris ortalama balı", "ortalama_bali", ["tədris ortalama balı"]),
+    ("Fiziki hazırlığı", "fiziki_hazirliq", ["fiziki hazırlığı"]),
+    ("İtirdiyi intizam balı", "itirdiyi_intizam_bali",
+     ["kurs ərzində itirdiyi intizam balı"]),
+    ("Kəsildiyi fənlər", "kesildiyi_fenler",
+     ["son semestr imtahanı ərzində kəsildiyi fənnlər",
+      "son semestr imtahanı ərzində kəsildiyi fənlər",
+      "kəsildiyi fənnlər", "kəsildiyi fənlər"]),
+    ("Əlaqə nömrəsi", "elaqe", ["əlaqə nömrəsi"]),
+    ("Oxuduğu məktəb və ya lisey", "mekteb", ["oxuduğu məktəb və ya lisey"]),
+    ("Hərbi İnstituta qəbul balı", "qebul_bali", ["hərbi instituta qəbul balı"]),
+    ("Hərbi İnstituta qəbul tarixi", "qebul_tarixi", ["hərbi instituta qəbul tarixi"]),
+    ("Qan qrupu", "qan_qrupu", ["qan qrupu"]),
+    ("Risk qrupu", "risk_qrupu", ["risk qrupu"]),
+    ("Siqaret", "siqaret", ["siqaret"]),
+    ("İçki", "icki", ["içki"]),
+    ("Sevimli məşğuliyyəti", "mesguliyyet", ["sevimli məşğuliyyəti"]),
+    ("Ata", "ata", ["ata"]),
+    ("Ata doğum tarixi", "ata_dogum_tarixi", ["ata doğum tarixi gün/ay/il", "ata doğum tarixi"]),
+    ("Ata iş yeri", "ata_is_yeri", ["ata iş yeri"]),
+    ("Ana", "ana", ["ana"]),
+    ("Ana doğum tarixi", "ana_dogum_tarixi", ["ana doğum tarixi gün,ay,il", "ana doğum tarixi"]),
+    ("Ana iş yeri", "ana_is_yeri", ["ana iş yeri"]),
+    ("Bacı", "baci", ["bacı"]),
+    ("Bacı doğum tarixi", "baci_dogum_tarixi", ["bacı doğum tarixi gün,ay,il", "bacı doğum tarixi"]),
+    ("Bacı iş yeri", "baci_is_yeri", ["bacı iş yeri"]),
+    ("Qardaş", "qardas", ["qardaş"]),
+    ("Qardaş doğum tarixi", "qardas_dogum_tarixi", ["qardaş doğum tarixi gün,ay,il", "qardaş doğum tarixi"]),
+    ("Qardaş iş yeri", "qardas_is_yeri", ["qardaş iş yeri"]),
+    ("Ailədə vəfat edən", "vefat", ["ailədə vəfat edən"]),
+    ("Boşanma halı (himayə)", "bosanma", ["boşanma halı (himayə)", "boşanma halı"]),
+    ("Ailədə şəhid, qazi, əlillik", "aile_statusu",
+     ["ailədə şəhid,qazi,əlillik", "ailədə şəhid, qazi, əlillik"]),
+    ("Keçirdiyi xəstəliklər", "xestelikler", ["keçirdiyi xəstəliklər"]),
+    ("Keçirdiyi travmalar", "travmalar", ["keçirdiyi travmalar"]),
+    ("Kurs", "kurs", ["kurs"]),
+    ("Tabor", "tabor", ["tabor"]),
+    ("Bölük", "boluk", ["bölük", "boluk"]),
+    ("Tağım", "taqim", ["tağım", "taqim"]),
+    ("Qrup", "qrup", ["qrup"]),
+    ("Yaxa №", "yaxa_no", ["yaxa №", "yaxa no"]),
+    ("Hadisə haqqında məlumat", "hadise", ["hadisə haqqında məlumat"]),
+]
+
+DISPLAY_LABELS = {key: label for label, key, aliases in FIELDS}
+
+
+# -------------------- UI HELPERS --------------------
+
+def btn(text, bg=PANEL2, fg=WHITE, height=dp(50)):
+    return Button(
+        text=text,
+        size_hint_y=None,
+        height=height,
+        background_normal="",
+        background_down="",
+        background_color=get_color_from_hex(bg),
+        color=get_color_from_hex(fg),
+        bold=True,
+        font_size="14sp",
+    )
+
+
+class Panel(BoxLayout):
+    def __init__(self, bg=PANEL, **kwargs):
+        super().__init__(**kwargs)
         with self.canvas.before:
-            Color(*bg_color)
-            self.rect = Rectangle(size=self.size, pos=self.pos)
-        self.bind(size=self._update_rect, pos=self._update_rect)
+            Color(*get_color_from_hex(bg))
+            self.shape = RoundedRectangle(
+                pos=self.pos, size=self.size, radius=[dp(16)]
+            )
+        self.bind(pos=self.update_shape, size=self.update_shape)
 
-    def _update_rect(self, instance, value):
-        self.rect.size = instance.size
-        self.rect.pos = instance.pos
+    def update_shape(self, *_):
+        self.shape.pos = self.pos
+        self.shape.size = self.size
 
-# 1. GİRİŞ (LOGIN) EKRANI
-class LoginScreen(Screen):
+
+def normalise(text):
+    text = str(text).lower().replace(":", "").replace("\n", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def get_aliases():
+    aliases = []
+    for label, key, variants in FIELDS:
+        for variant in variants:
+            aliases.append((normalise(variant), key))
+    # Check longer labels first so "Ata doğum tarixi" isn't mistaken for "Ata".
+    aliases.sort(key=lambda pair: len(pair[0]), reverse=True)
+    return aliases
+
+
+# -------------------- WORD IMPORT --------------------
+
+def parse_docx(path):
+    if not DOCX_AVAILABLE:
+        raise RuntimeError(
+            "Word dəstəyi yüklənməyib. buildozer.spec faylında "
+            "requirements = python3,kivy,python-docx yazın. "
+            + DOCX_ERROR[:150]
+        )
+
+    doc = Document(path)
+    found = {}
+    aliases = get_aliases()
+
+    def match_label(raw_label):
+        label = normalise(raw_label)
+        label = re.sub(r"^\d+[\.\)]\s*", "", label)
+        for alias, key in aliases:
+            if label == alias:
+                return key
+        return None
+
+    # Read Word tables. Supports label/value columns and "Label: value" cells.
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            for index, raw in enumerate(cells):
+                if not raw:
+                    continue
+
+                label_text = raw
+                value = ""
+
+                if ":" in raw:
+                    left, right = raw.split(":", 1)
+                    label_text = left.strip()
+                    value = right.strip()
+
+                key = match_label(label_text)
+                if not key:
+                    continue
+
+                if not value:
+                    # Common form layout has a label cell followed by a value cell.
+                    for next_cell in cells[index + 1:]:
+                        if next_cell.strip():
+                            value = next_cell.strip()
+                            break
+
+                if value:
+                    found[key] = value
+
+    # Also read paragraphs containing "Label: value".
+    for paragraph in doc.paragraphs:
+        if ":" not in paragraph.text:
+            continue
+        left, right = paragraph.text.split(":", 1)
+        key = match_label(left)
+        if key and right.strip():
+            found[key] = right.strip()
+
+    if not found.get("adi") and not found.get("soyadi"):
+        raise ValueError(
+            "Adı/Soyadı Word sənədində tapılmadı. "
+            "Sənəddə məlumatların etiketləri tanınan formada olmalıdır."
+        )
+
+    found.setdefault("adi", "Naməlum")
+    found.setdefault("soyadi", "Kursant")
+    found.setdefault("kurs", "Hazırlıq kursu")
+    found.setdefault("tabor", "Kursant hazırlıq")
+    found.setdefault("boluk", "3-cü kursant")
+    return found
+
+
+# -------------------- LOGIN SCREEN --------------------
+
+class Login(Screen):
     def __init__(self, **kwargs):
-        super(LoginScreen, self).__init__(**kwargs)
-        layout = BackgroundBoxLayout(orientation='vertical', padding=30, spacing=20, bg_color=(0.06, 0.09, 0.14, 1))
-        
-        # AAHM emblem uploaded by the user
-        logo_path = os.path.join(os.path.dirname(__file__), "aahm_logo.png")
-        layout.add_widget(Image(source=logo_path, size_hint_y=None, height=150, allow_stretch=True, keep_ratio=True))
-        layout.add_widget(Label(text="AAHM", font_size=32, bold=True, color=(0.9, 0.9, 0.9, 1), size_hint_y=None, height=50))
-        layout.add_widget(Label(text="Hərbi İnstitut - Arayış İdarəetmə", font_size=16, color=(0.6, 0.7, 0.8, 1), size_hint_y=None, height=30))
-        
-        # Boşluq
-        layout.add_widget(Label(size_hint_y=None, height=20))
-        
-        self.user_input = TextInput(hint_text="İstifadəçi adı (admin)", multiline=False, size_hint_y=None, height=50)
-        self.pass_input = TextInput(hint_text="Şifrə (admin)", password=True, multiline=False, size_hint_y=None, height=50)
-        
-        layout.add_widget(self.user_input)
-        layout.add_widget(self.pass_input)
-        
-        self.error_label = Label(text="", color=(1, 0.3, 0.3, 1), size_hint_y=None, height=30)
-        layout.add_widget(self.error_label)
-        
-        btn_login = Button(text="DAXİL OL", size_hint_y=None, height=55, background_color=(0.1, 0.5, 0.8, 1), bold=True)
-        btn_login.bind(on_press=self.check_login)
-        layout.add_widget(btn_login)
-        
-        self.add_widget(layout)
+        super().__init__(**kwargs)
 
-    def check_login(self, instance):
-        if self.user_input.text == "admin" and self.pass_input.text == "admin":
-            self.error_label.text = ""
-            self.user_input.text = ""
-            self.pass_input.text = ""
-            self.manager.current = 'main'
+        root = BoxLayout(
+            orientation="vertical",
+            padding=dp(24),
+            spacing=dp(14),
+        )
+
+        root.add_widget(Label(text="", size_hint_y=0.12))
+
+        logo = Panel(
+            orientation="vertical",
+            padding=dp(18),
+            spacing=dp(6),
+            size_hint_y=None,
+            height=dp(145),
+            bg="#13243A",
+        )
+        logo.add_widget(Label(
+            text="AAHM",
+            font_size="36sp",
+            bold=True,
+            color=get_color_from_hex(GOLD),
+        ))
+        logo.add_widget(Label(
+            text="KURSANT ARAYIŞ-MƏRUZƏ SİSTEMİ",
+            font_size="12sp",
+            color=get_color_from_hex(MUTED),
+        ))
+        root.add_widget(logo)
+
+        root.add_widget(Label(
+            text="İdarəetmə panelinə xoş gəlmisiniz",
+            color=get_color_from_hex(WHITE),
+            size_hint_y=None,
+            height=dp(42),
+        ))
+
+        self.username = TextInput(
+            hint_text="İstifadəçi adı",
+            multiline=False,
+            size_hint_y=None,
+            height=dp(50),
+        )
+        self.password = TextInput(
+            hint_text="Şifrə",
+            password=True,
+            multiline=False,
+            size_hint_y=None,
+            height=dp(50),
+        )
+
+        root.add_widget(self.username)
+        root.add_widget(self.password)
+
+        self.message = Label(
+            text="",
+            color=get_color_from_hex(RED),
+            size_hint_y=None,
+            height=dp(36),
+        )
+        root.add_widget(self.message)
+
+        login_button = btn("DAXİL OL  →", GOLD, "#101827", dp(54))
+        login_button.bind(on_release=self.check_login)
+        root.add_widget(login_button)
+
+        root.add_widget(Label(
+            text="Sınaq giriş: admin / admin",
+            color=get_color_from_hex(MUTED),
+            font_size="12sp",
+            size_hint_y=None,
+            height=dp(30),
+        ))
+
+        self.add_widget(root)
+
+    def check_login(self, *_):
+        if (
+            self.username.text.strip() == "admin"
+            and self.password.text == "admin"
+        ):
+            self.message.text = ""
+            self.manager.current = "main"
         else:
-            self.error_label.text = "Səhv istifadəçi adı və ya şifrə! (admin/admin)"
+            self.message.text = "İstifadəçi adı və ya şifrə yanlışdır."
 
-# 2. ƏSAS EKRAN (KURSANTLAR SİYAHISI VƏ AXTARIŞ)
-class MainScreen(Screen):
+
+# -------------------- MAIN LIST SCREEN --------------------
+
+class Main(Screen):
     def __init__(self, **kwargs):
-        super(MainScreen, self).__init__(**kwargs)
-        layout = BackgroundBoxLayout(orientation='vertical', padding=20, spacing=15, bg_color=(0.08, 0.12, 0.18, 1))
-        
-        top_bar = BoxLayout(size_hint_y=None, height=50, spacing=10)
-        top_bar.add_widget(Label(text="Kursant Arayış-Məruzələri", font_size=20, bold=True, color=(1, 1, 1, 1)))
-        
-        btn_logout = Button(text="Çıxış", size_hint_x=None, width=80, background_color=(0.8, 0.2, 0.2, 1))
-        btn_logout.bind(on_press=self.logout)
-        top_bar.add_widget(btn_logout)
-        layout.add_widget(top_bar)
-        
-        self.search_input = TextInput(hint_text="🔍 Kursant axtar (Ad, Soyad)...", size_hint_y=None, height=45, multiline=False)
-        self.search_input.bind(text=self.filter_list)
-        layout.add_widget(self.search_input)
-        
-        self.scroll = ScrollView()
-        self.list_layout = GridLayout(cols=1, spacing=10, size_hint_y=None, padding=5)
-        self.list_layout.bind(minimum_height=self.list_layout.setter('height'))
-        self.scroll.add_widget(self.list_layout)
-        layout.add_widget(self.scroll)
-        
-        btn_import = Button(text="📁 Word Faylından Kursant Əlavə Et (.docx)", size_hint_y=None, height=55, background_color=(0.1, 0.6, 0.3, 1), bold=True)
-        btn_import.bind(on_press=self.go_to_import)
-        layout.add_widget(btn_import)
-        
-        self.add_widget(layout)
-        self.update_list()
+        super().__init__(**kwargs)
 
-    def update_list(self, search_text=""):
-        self.list_layout.clear_widgets()
-        data = load_data()
-        for item in data:
-            full_name = f"{item.get('soyadi', '')} {item.get('adi', '')} {item.get('ata_adi', '')}"
-            if search_text.lower() in full_name.lower() or search_text == "":
-                btn = Button(text=f"  👤 {full_name}", size_hint_y=None, height=55, background_color=(0.15, 0.22, 0.32, 1), color=(1,1,1,1))
-                btn.bind(on_press=lambda inst, k=item: self.open_detail(k))
-                self.list_layout.add_widget(btn)
+        root = BoxLayout(
+            orientation="vertical",
+            padding=dp(14),
+            spacing=dp(9),
+        )
 
-    def filter_list(self, instance, value):
-        self.update_list(value)
+        top = BoxLayout(size_hint_y=None, height=dp(48))
+        top.add_widget(Label(
+            text="AAHM | Kursantlar",
+            bold=True,
+            font_size="20sp",
+            color=get_color_from_hex(WHITE),
+            halign="left",
+        ))
 
-    def open_detail(self, kursant_data):
-        detail_screen = self.manager.get_screen('detail')
-        detail_screen.display_kursant(kursant_data)
-        self.manager.current = 'detail'
+        logout = btn("Çıxış", "#74343C", height=dp(40))
+        logout.size_hint_x = None
+        logout.width = dp(78)
+        logout.bind(on_release=lambda *_: setattr(self.manager, "current", "login"))
+        top.add_widget(logout)
+        root.add_widget(top)
 
-    def go_to_import(self, instance):
-        self.manager.current = 'import'
+        self.search = TextInput(
+            hint_text="Ad, soyad və ya ata adı ilə axtar...",
+            multiline=False,
+            size_hint_y=None,
+            height=dp(46),
+        )
+        self.search.bind(text=lambda *_: self.refresh())
+        root.add_widget(self.search)
 
-    def logout(self, instance):
-        self.manager.current = 'login'
+        self.count = Label(
+            text="KURSANTLAR: 0",
+            color=get_color_from_hex(MUTED),
+            size_hint_y=None,
+            height=dp(25),
+        )
+        root.add_widget(self.count)
 
-    def on_enter(self):
-        self.update_list()
+        scroll = ScrollView()
+        self.listing = GridLayout(
+            cols=1,
+            spacing=dp(8),
+            size_hint_y=None,
+            padding=[0, dp(3)],
+        )
+        self.listing.bind(minimum_height=self.listing.setter("height"))
+        scroll.add_widget(self.listing)
+        root.add_widget(scroll)
 
-# 3. WORD FAYLINDAN AVTOMATİK ƏLAVƏ ETMƏ EKRANI
-class ImportScreen(Screen):
-    def __init__(self, **kwargs):
-        super(ImportScreen, self).__init__(**kwargs)
-        layout = BackgroundBoxLayout(orientation='vertical', padding=25, spacing=20, bg_color=(0.08, 0.12, 0.18, 1))
-        
-        layout.add_widget(Label(text="Word Faylından Əlavə Et", font_size=22, bold=True, color=(1,1,1,1), size_hint_y=None, height=40))
-        layout.add_widget(Label(text="Word faylını telefonun 'Download' qovluğuna qoyun\nvə faylın adını yazın (məsələn: arayis.docx)", color=(0.7, 0.7, 0.7, 1), size_hint_y=None, height=50))
-        
-        self.file_input = TextInput(hint_text="Faylın adı (məs: arayis.docx)", multiline=False, size_hint_y=None, height=50)
-        layout.add_widget(self.file_input)
-        
-        self.status_label = Label(text="", color=(0.2, 1, 0.2, 1), size_hint_y=None, height=40)
-        layout.add_widget(self.status_label)
-        
-        btn_parse = Button(text="📥 Faylı Oxu və Əlavə Et", size_hint_y=None, height=55, background_color=(0.1, 0.6, 0.3, 1), bold=True)
-        btn_parse.bind(on_press=self.parse_and_save_word)
-        layout.add_widget(btn_parse)
-        
-        btn_back = Button(text="◀ Geri qayıt", size_hint_y=None, height=50, background_color=(0.4, 0.4, 0.4, 1))
-        btn_back.bind(on_press=self.go_back)
-        layout.add_widget(btn_back)
-        
-        self.add_widget(layout)
+        add_button = btn(
+            "＋  WORD FAYLINDAN KURSANT ƏLAVƏ ET",
+            GREEN,
+            height=dp(56),
+        )
+        add_button.bind(
+            on_release=lambda *_: setattr(self.manager, "current", "import")
+        )
+        root.add_widget(add_button)
 
-    def parse_and_save_word(self, instance):
-        filename = self.file_input.text.strip()
-        if not filename:
-            self.status_label.color = (1, 0.3, 0.3, 1)
-            self.status_label.text = "Zəhmət olmasa fayl adını daxil edin!"
+        self.add_widget(root)
+
+    def on_enter(self, *_):
+        self.refresh()
+
+    def refresh(self):
+        if not hasattr(self, "listing"):
             return
-        
-        full_path = f"/sdcard/Download/{filename}"
-        if not os.path.exists(full_path):
-            full_path = filename  # Cari qovluqda yoxla
-            if not os.path.exists(full_path):
-                self.status_label.color = (1, 0.3, 0.3, 1)
-                self.status_label.text = "Fayl tapılmadı! Download qovluğunu yoxlayın."
+
+        self.listing.clear_widgets()
+        data = load_data()
+        query = self.search.text.casefold().strip()
+        count = 0
+
+        for person in data:
+            name = " ".join(
+                str(person.get(key, "") or "")
+                for key in ("soyadi", "adi", "ata_adi")
+            ).strip()
+
+            if query and query not in name.casefold():
+                continue
+
+            count += 1
+            item_button = btn(
+                "👤  " + (name or "Adsız kursant") + "   ›",
+                PANEL2,
+                height=dp(58),
+            )
+            item_button.halign = "left"
+            item_button.bind(
+                on_release=lambda _button, p=person: self.open_person(p)
+            )
+            self.listing.add_widget(item_button)
+
+        self.count.text = "KURSANTLAR: " + str(count)
+
+        if count == 0:
+            self.listing.add_widget(Label(
+                text="Siyahı boşdur. Word faylından kursant əlavə edin.",
+                color=get_color_from_hex(MUTED),
+                size_hint_y=None,
+                height=dp(70),
+            ))
+
+    def open_person(self, person):
+        detail = self.manager.get_screen("detail")
+        detail.show_person(person)
+        self.manager.current = "detail"
+
+
+# -------------------- IMPORT SCREEN --------------------
+
+class Import(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+        root = BoxLayout(
+            orientation="vertical",
+            padding=dp(10),
+            spacing=dp(8),
+        )
+
+        bar = BoxLayout(size_hint_y=None, height=dp(46))
+        back = btn("‹ Geri", height=dp(42))
+        back.size_hint_x = None
+        back.width = dp(85)
+        back.bind(on_release=lambda *_: setattr(self.manager, "current", "main"))
+        bar.add_widget(back)
+        bar.add_widget(Label(
+            text="Word faylı seç",
+            color=get_color_from_hex(WHITE),
+            bold=True,
+            font_size="17sp",
+        ))
+        root.add_widget(bar)
+
+        root.add_widget(Label(
+            text="Telefondan .docx faylını seçin, sonra ƏLAVƏ ET düyməsinə basın.",
+            color=get_color_from_hex(MUTED),
+            size_hint_y=None,
+            height=dp(42),
+            font_size="12sp",
+        ))
+
+        start_path = "/storage/emulated/0"
+        if not os.path.isdir(start_path):
+            start_path = App.get_running_app().user_data_dir
+
+        self.chooser = FileChooserListView(
+            path=start_path,
+            filters=["*.docx", "*.DOCX"],
+            dirselect=False,
+            multiselect=False,
+        )
+        root.add_widget(self.chooser)
+
+        self.selected_label = Label(
+            text="Fayl seçilməyib",
+            color=get_color_from_hex(MUTED),
+            size_hint_y=None,
+            height=dp(30),
+            font_size="11sp",
+        )
+        root.add_widget(self.selected_label)
+        self.chooser.bind(selection=self.selection_changed)
+
+        import_button = btn(
+            "✓  SEÇİLMİŞ WORD FAYLINI ƏLAVƏ ET",
+            GREEN,
+            height=dp(54),
+        )
+        import_button.bind(on_release=self.import_selected)
+        root.add_widget(import_button)
+
+        self.status = Label(
+            text="",
+            color=get_color_from_hex(WHITE),
+            size_hint_y=None,
+            height=dp(58),
+            font_size="12sp",
+        )
+        root.add_widget(self.status)
+        self.add_widget(root)
+
+    def selection_changed(self, _chooser, selection):
+        self.selected_label.text = (
+            selection[0] if selection else "Fayl seçilməyib"
+        )
+
+    def import_selected(self, *_):
+        selection = self.chooser.selection
+        if not selection:
+            self.status.color = get_color_from_hex(RED)
+            self.status.text = "Əvvəlcə .docx faylı seçin."
+            return
+
+        try:
+            person = parse_docx(selection[0])
+            data = load_data()
+
+            fin = str(person.get("fin", "")).strip().casefold()
+            duplicate = False
+
+            for old in data:
+                old_fin = str(old.get("fin", "")).strip().casefold()
+                same_name = (
+                    str(old.get("adi", "")).casefold()
+                    == str(person.get("adi", "")).casefold()
+                    and str(old.get("soyadi", "")).casefold()
+                    == str(person.get("soyadi", "")).casefold()
+                    and str(old.get("dogum_tarixi", ""))
+                    == str(person.get("dogum_tarixi", ""))
+                )
+                if (fin and fin == old_fin) or same_name:
+                    duplicate = True
+                    break
+
+            if duplicate:
+                self.status.color = get_color_from_hex(GOLD)
+                self.status.text = "Bu kursant artıq siyahıdadır."
                 return
 
-        try:
-            doc = Document(full_path)
-            new_data = {
-                "kurs": "Hazırlıq kursu",
-                "tabor": "Kursant hazırlıq",
-                "boluk": "3-cü kursant"
-            }
-            
-            # Word cədvəlini oxuyub məlumatları çıxarırıq
-            for table in doc.tables:
-                for row in table.rows:
-                    cells = row.cells
-                    if len(cells) >= 2:
-                        key = cells[0].text.strip().replace(':', '').lower()
-                        val = cells[1].text.strip()
-                        if 'adı' in key and 'ata' not in key and 'soy' not in key:
-                            new_data['adi'] = val
-                        elif 'soyadı' in key:
-                            new_data['soyadi'] = val
-                        elif 'ata adı' in key:
-                            new_data['ata_adi'] = val
-                        elif 'doğulduğu tarix' in key:
-                            new_data['dogum_tarixi'] = val
-                        elif 'vəsiqə' in key or 'fin' in key:
-                            new_data['fin'] = val
-                        elif 'əlaqə' in key:
-                            new_data['elaqe'] = val
-                        elif 'qan qrupu' in key:
-                            new_data['qan_qrupu'] = val
-                        elif key == 'ata':
-                            new_data['ata'] = val
-                        elif key == 'ana':
-                            new_data['ana'] = val
-
-            # Əgər cədvəldən tapılmasa, standart ad verək
-            if not new_data.get('adi'): new_data['adi'] = "Naməlum"
-            if not new_data.get('soyadi'): new_data['soyadi'] = "Kursant"
-
-            data = load_data()
-            data.append(new_data)
+            data.append(person)
             save_data(data)
 
-            self.status_label.color = (0.2, 1, 0.2, 1)
-            self.status_label.text = "Uğurla əlavə olundu!"
-            self.file_input.text = ""
-        except Exception as e:
-            self.status_label.color = (1, 0.3, 0.3, 1)
-            self.status_label.text = f"Xəta baş verdi: {str(e)[:30]}"
+            self.status.color = get_color_from_hex(GREEN)
+            self.status.text = (
+                "Əlavə edildi: "
+                + str(person.get("soyadi", ""))
+                + " "
+                + str(person.get("adi", ""))
+            )
+            self.manager.get_screen("main").refresh()
 
-    def go_back(self, instance):
-        self.manager.current = 'main'
+        except Exception as exc:
+            self.status.color = get_color_from_hex(RED)
+            self.status.text = "Xəta: " + str(exc)[:220]
 
-# 4. KURSANT DETAL VƏ WORD-Ə YÜKLƏMƏ EKRANI
-class DetailScreen(Screen):
+
+# -------------------- PERSON DETAILS AND EXPORT --------------------
+
+class Detail(Screen):
     def __init__(self, **kwargs):
-        super(DetailScreen, self).__init__(**kwargs)
-        layout = BackgroundBoxLayout(orientation='vertical', padding=20, spacing=10, bg_color=(0.08, 0.12, 0.18, 1))
-        
-        top_bar = BoxLayout(size_hint_y=None, height=50, spacing=10)
-        btn_back = Button(text="◀ Geri", size_hint_x=0.3, background_color=(0.3, 0.3, 0.4, 1))
-        btn_back.bind(on_press=self.go_back)
-        top_bar.add_widget(btn_back)
-        top_bar.add_widget(Label(text="Arayış-Məruzə Sənədi", bold=True, color=(1,1,1,1)))
-        layout.add_widget(top_bar)
-        
-        self.scroll = ScrollView()
-        self.content_layout = GridLayout(cols=1, spacing=8, size_hint_y=None, padding=5)
-        self.content_layout.bind(minimum_height=self.content_layout.setter('height'))
-        self.scroll.add_widget(self.content_layout)
-        layout.add_widget(self.scroll)
-        
-        btn_export = Button(text="📥 Word (.docx) Faylına Yüklə", size_hint_y=None, height=55, background_color=(0.8, 0.4, 0.1, 1), bold=True)
-        btn_export.bind(on_press=self.export_to_word)
-        layout.add_widget(btn_export)
-        
-        self.add_widget(layout)
-        self.current_kursant = {}
+        super().__init__(**kwargs)
+        self.person = {}
 
-    def display_kursant(self, data):
-        self.current_kursant = data
-        self.content_layout.clear_widgets()
-        
-        fields = [
-            ("Adı", data.get("adi", "")),
-            ("Soyadı", data.get("soyadi", "")),
-            ("Ata adı", data.get("ata_adi", "")),
-            ("Doğulduğu tarix", data.get("dogum_tarixi", "")),
-            ("Vəsiqə Seriya və FİN", data.get("fin", "")),
-            ("Kurs", data.get("kurs", "Hazırlıq kursu")),
-            ("Tabor", data.get("tabor", "Kursant hazırlıq")),
-            ("Bölük", data.get("boluk", "3-cü kursant")),
-            ("Əlaqə nömrəsi", data.get("elaqe", "")),
-            ("Qan qrupu", data.get("qan_qrupu", "")),
-            ("Ata", data.get("ata", "")),
-            ("Ana", data.get("ana", ""))
-        ]
-        
-        for k, v in fields:
-            lbl = Label(text=f"[b]{k}:[/b] {v}", markup=True, size_hint_y=None, height=40, halign='left', valign='middle', color=(0.9, 0.9, 0.9, 1))
-            lbl.bind(size=lambda s, w: s.setter('text_size')(s, (w, None)))
-            self.content_layout.add_widget(lbl)
+        root = BoxLayout(
+            orientation="vertical",
+            padding=dp(12),
+            spacing=dp(8),
+        )
 
-    def export_to_word(self, instance):
-        doc = Document()
-        doc.add_heading('ARAYIŞ-MƏRUZƏ', 0)
-        
-        d = self.current_kursant
-        table = doc.add_table(rows=1, cols=2)
-        hdr_cells = table.rows[0].cells
-        hdr_cells[0].text = 'Parametr'
-        hdr_cells[1].text = 'Məlumat'
-        
-        rows_data = [
-            ("Adı", d.get("adi", "")),
-            ("Soyadı", d.get("soyadi", "")),
-            ("Ata adı", d.get("ata_adi", "")),
-            ("Doğulduğu tarix gün,ay,il", d.get("dogum_tarixi", "")),
-            ("Vəsiqə Seriya və Fin kodu", d.get("fin", "")),
-            ("Kurs", d.get("kurs", "Hazırlıq kursu")),
-            ("Tabor", d.get("tabor", "Kursant hazırlıq")),
-            ("Bölük", d.get("boluk", "3-cü kursant")),
-            ("Əlaqə nömrəsi", d.get("elaqe", "")),
-            ("Qan qrupu", d.get("qan_qrupu", "")),
-            ("Ata", d.get("ata", "")),
-            ("Ana", d.get("ana", ""))
-        ]
-        
-        for key, val in rows_data:
-            row_cells = table.add_row().cells
-            row_cells[0].text = key
-            row_cells[1].text = val
-            
-        filename = f"/sdcard/Download/Arayis_{d.get('soyadi', 'Kursant')}.docx"
+        bar = BoxLayout(size_hint_y=None, height=dp(44))
+        back = btn("‹ Geri", height=dp(40))
+        back.size_hint_x = None
+        back.width = dp(80)
+        back.bind(on_release=lambda *_: setattr(self.manager, "current", "main"))
+        bar.add_widget(back)
+        bar.add_widget(Label(
+            text="Kursant məlumatları",
+            color=get_color_from_hex(WHITE),
+            bold=True,
+            font_size="18sp",
+        ))
+        root.add_widget(bar)
+
+        scroll = ScrollView()
+        self.rows = GridLayout(
+            cols=1,
+            spacing=dp(5),
+            size_hint_y=None,
+            padding=[0, dp(3)],
+        )
+        self.rows.bind(minimum_height=self.rows.setter("height"))
+        scroll.add_widget(self.rows)
+        root.add_widget(scroll)
+
+        export_button = btn(
+            "WORD ARAYIŞ-MƏRUZƏSİ YARAT",
+            GOLD,
+            "#101827",
+            dp(54),
+        )
+        export_button.bind(on_release=self.export)
+        root.add_widget(export_button)
+
+        self.status = Label(
+            text="",
+            color=get_color_from_hex(MUTED),
+            size_hint_y=None,
+            height=dp(48),
+            font_size="11sp",
+        )
+        root.add_widget(self.status)
+        self.add_widget(root)
+
+    def show_person(self, person):
+        self.person = dict(person)
+        self.rows.clear_widgets()
+
+        name = " ".join(
+            str(self.person.get(key, "") or "").strip()
+            for key in ("soyadi", "adi", "ata_adi")
+            if str(self.person.get(key, "") or "").strip()
+        )
+
+        header = Panel(
+            orientation="vertical",
+            padding=dp(12),
+            spacing=dp(5),
+            size_hint_y=None,
+            height=dp(115),
+            bg="#13243A",
+        )
+        header.add_widget(Label(
+            text=name or "Adsız kursant",
+            color=get_color_from_hex(GOLD),
+            font_size="19sp",
+            bold=True,
+            size_hint_y=None,
+            height=dp(35),
+        ))
+        for label, key in [
+            ("Kurs", "kurs"),
+            ("Tabor", "tabor"),
+            ("Bölük", "boluk"),
+            ("Tağım", "taqim"),
+        ]:
+            header.add_widget(Label(
+                text=label + ": " + str(self.person.get(key, "—") or "—"),
+                color=get_color_from_hex(MUTED),
+                font_size="12sp",
+                size_hint_y=None,
+                height=dp(18),
+            ))
+        self.rows.add_widget(header)
+
+        hidden = {"adi", "soyadi", "ata_adi", "kurs", "tabor", "boluk", "taqim"}
+        for key, value in self.person.items():
+            if key in hidden:
+                continue
+
+            card = Panel(
+                orientation="horizontal",
+                padding=[dp(10), dp(7)],
+                spacing=dp(6),
+                size_hint_y=None,
+                height=dp(60),
+                bg=PANEL,
+            )
+
+            label_widget = Label(
+                text=DISPLAY_LABELS.get(key, key),
+                color=get_color_from_hex(MUTED),
+                font_size="12sp",
+                size_hint_x=0.46,
+                halign="left",
+                valign="middle",
+            )
+            value_widget = Label(
+                text=str(value or "—"),
+                color=get_color_from_hex(WHITE),
+                font_size="13sp",
+                size_hint_x=0.54,
+                halign="left",
+                valign="middle",
+            )
+
+            label_widget.bind(
+                size=lambda widget, size: setattr(widget, "text_size", size)
+            )
+            value_widget.bind(
+                size=lambda widget, size: setattr(widget, "text_size", size)
+            )
+
+            card.add_widget(label_widget)
+            card.add_widget(value_widget)
+            self.rows.add_widget(card)
+
+        self.status.text = ""
+
+    def export(self, *_):
+        if not DOCX_AVAILABLE:
+            self.status.color = get_color_from_hex(RED)
+            self.status.text = (
+                "Word dəstəyi yoxdur. buildozer.spec faylında "
+                "python-docx asılılığını yoxlayın. " + DOCX_ERROR[:100]
+            )
+            return
+
         try:
-            doc.save(filename)
-        except:
-            doc.save("arayis.docx")
+            doc = Document()
+            doc.add_heading("ARAYIŞ-MƏRUZƏ", 0)
 
-    def go_back(self, instance):
-        self.manager.current = 'main'
+            full_name = " ".join(
+                str(self.person.get(key, "") or "")
+                for key in ("soyadi", "adi", "ata_adi")
+            ).strip()
+            if full_name:
+                doc.add_paragraph("Kursant: " + full_name)
 
-class ArayisApp(App):
+            table = doc.add_table(rows=1, cols=2)
+            table.style = "Table Grid"
+            table.rows[0].cells[0].text = "Parametr"
+            table.rows[0].cells[1].text = "Məlumat"
+
+            for key, value in self.person.items():
+                cells = table.add_row().cells
+                cells[0].text = DISPLAY_LABELS.get(key, key)
+                cells[1].text = str(value or "")
+
+            folder = os.path.join(
+                App.get_running_app().user_data_dir,
+                "Arayislar",
+            )
+            os.makedirs(folder, exist_ok=True)
+
+            surname = str(self.person.get("soyadi", "Kursant"))
+            safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", surname).strip("_")
+            if not safe_name:
+                safe_name = "Kursant"
+
+            path = os.path.join(folder, "Arayis_" + safe_name + ".docx")
+            doc.save(path)
+
+            self.status.color = get_color_from_hex(GREEN)
+            self.status.text = (
+                "Word faylı yaradıldı. Tətbiqin şəxsi Arayislar qovluğunda saxlanıldı."
+            )
+
+        except Exception as exc:
+            self.status.color = get_color_from_hex(RED)
+            self.status.text = "Word yaratma xətası: " + str(exc)[:180]
+
+
+# -------------------- APP --------------------
+
+class AAHMApp(App):
     def build(self):
-        sm = ScreenManager()
-        sm.add_widget(LoginScreen(name='login'))
-        sm.add_widget(MainScreen(name='main'))
-        sm.add_widget(ImportScreen(name='import'))
-        sm.add_widget(DetailScreen(name='detail'))
-        return sm
+        self.title = "AAHM Kursant Sistemi"
 
-if __name__ == '__main__':
-    ArayisApp().run()
+        manager = ScreenManager()
+        manager.add_widget(Login(name="login"))
+        manager.add_widget(Main(name="main"))
+        manager.add_widget(Import(name="import"))
+        manager.add_widget(Detail(name="detail"))
+
+        return manager
+
+
+if __name__ == "__main__":
+    try:
+        AAHMApp().run()
+    except Exception:
+        # Print startup traceback into the Android/build log for diagnosis.
+        traceback.print_exc()
