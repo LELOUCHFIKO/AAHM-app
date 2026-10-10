@@ -5,7 +5,7 @@ package.domain = az.edu.aahm
 source.dir = .
 source.include_exts = py,png,json,docx
 version = 0.1
-requirements = python3,kivy,python-docx
+requirements = python3,kivy,python-docx,lxml
 orientation = portrait
 fullscreen = 0
 
