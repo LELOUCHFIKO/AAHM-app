@@ -13,7 +13,7 @@ fullscreen = 0
 # how you choose to import/export files.
 android.permissions = READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE
 android.api = 35
-android.minapi = 23
+android.minapi = 24
 android.archs = arm64-v8a
 android.accept_sdk_license = True
 
