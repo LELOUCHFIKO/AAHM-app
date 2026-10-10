@@ -1,0 +1,23 @@
+[
+    {
+        "adi": "Elvin",
+        "soyadi": "Məmmədov",
+        "ata_adi": "Rəhim",
+        "dogum_tarixi": "12.05.2005",
+        "fin": "1234567",
+        "kurs": "Hazırlıq kursu",
+        "tabor": "Kursant hazırlıq",
+        "boluk": "3-cü kursant",
+        "elaqe": "+994501234567",
+        "qan_qrupu": "II (A) Rh+",
+        "ata": "Rəhim Məmmədov",
+        "ana": "Nərmin Məmmədova"
+    },
+    {
+        "kurs": "Hazırlıq kursu",
+        "tabor": "Kursant hazırlıq",
+        "boluk": "3-cü kursant",
+        "adi": "Naməlum",
+        "soyadi": "Kursant"
+    }
+]
