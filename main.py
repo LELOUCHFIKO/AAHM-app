@@ -270,20 +270,28 @@ class AndroidDocPicker:
 
 def copy_android_uri(uri, destination):
     """Copy SAF content:// URI into a normal app-private .docx file."""
-    from jnius import autoclass, jarray
+    # Do not import jarray: some packaged PyJNIus builds do not expose it.
+    # InputStream.read() without arguments returns one byte as an integer.
+    from jnius import autoclass
     PythonActivity = autoclass("org.kivy.android.PythonActivity")
     resolver = PythonActivity.mActivity.getContentResolver()
     stream = resolver.openInputStream(uri)
     if stream is None:
         raise IOError("Android faylı açmadı.")
-    buffer = jarray("b", [0] * 8192)
     try:
         with open(destination, "wb") as output:
+            chunk = bytearray()
             while True:
-                count = stream.read(buffer)
-                if count == -1:
+                value = stream.read()
+                if value == -1:
                     break
-                output.write(bytes((int(buffer[i]) & 255) for i in range(count)))
+                chunk.append(int(value) & 0xFF)
+                # Write in small batches to avoid holding the whole document in memory.
+                if len(chunk) >= 8192:
+                    output.write(chunk)
+                    chunk.clear()
+            if chunk:
+                output.write(chunk)
     finally:
         stream.close()
 
