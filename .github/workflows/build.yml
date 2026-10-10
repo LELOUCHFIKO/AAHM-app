@@ -30,7 +30,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: pip
 
       - name: Install system dependencies
         run: |
@@ -59,8 +58,12 @@ jobs:
           restore-keys: |
             aahm-${{ runner.os }}-
 
-      - name: Show Android configuration
+      - name: Check Android configuration
         run: |
+          if [ ! -f buildozer.spec ]; then
+            echo "ERROR: buildozer.spec was not found."
+            exit 1
+          fi
           grep -nE '^(requirements|android.api|android.minapi|android.ndk|android.ndk_api|p4a.branch)' buildozer.spec || true
 
       - name: Build debug APK
@@ -91,5 +94,6 @@ jobs:
       - name: Report build failure
         if: steps.apk.outcome != 'success'
         run: |
-          echo "APK build failed. Download the AAHM-build-log artifact."
+          echo "APK build failed."
+          echo "Download the AAHM-build-log artifact to inspect the error."
           exit 1
