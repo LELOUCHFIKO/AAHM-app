@@ -8,7 +8,7 @@ source.dir = .
 source.include_exts = py,png,jpg,jpeg,kv,atlas,json,docx
 version = 0.1
 
-requirements = python3,kivy,python-docx,lxml
+requirements = python3,kivy
 
 icon.filename = %(source.dir)s/aahm_logo.png
 
