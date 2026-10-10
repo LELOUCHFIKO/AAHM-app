@@ -20,6 +20,7 @@ from kivy.graphics import Color, RoundedRectangle
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
+from kivy.uix.image import Image
 from kivy.uix.textinput import TextInput
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.scrollview import ScrollView
@@ -143,6 +144,19 @@ class Panel(BoxLayout):
 def normalise(text):
     text = str(text).lower().replace(":", "").replace("\n", " ")
     return re.sub(r"\s+", " ", text).strip()
+
+
+def person_name_key(person):
+    """Stable full-name key; accents/case/extra spaces do not cause false differences."""
+    import unicodedata
+    parts = []
+    for key in ("adi", "soyadi", "ata_adi"):
+        value = str(person.get(key, "") or "").casefold().strip()
+        value = " ".join(value.split())
+        value = "".join(ch for ch in unicodedata.normalize("NFKC", value))
+        parts.append(value)
+    # Require all three components so missing patronymics don't cause false duplicates.
+    return tuple(parts) if all(parts) else None
 
 
 def alias_map():
@@ -367,10 +381,16 @@ class Login(Screen):
         root = BoxLayout(orientation="vertical", padding=dp(24), spacing=dp(14))
         root.add_widget(Label(text="", size_hint_y=.12))
 
-        hero = Panel(orientation="vertical", padding=dp(18), spacing=dp(7),
-                     size_hint_y=None, height=dp(155), bg="#13243A")
-        hero.add_widget(Label(text="✦  AAHM  ✦", font_size="36sp", bold=True,
-                              color=get_color_from_hex(GOLD)))
+        hero = Panel(orientation="vertical", padding=dp(12), spacing=dp(5),
+                     size_hint_y=None, height=dp(190), bg="#13243A")
+        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aahm_logo.png")
+        if os.path.isfile(logo_path):
+            logo = Image(source=logo_path, size_hint=(1, None), height=dp(115),
+                         allow_stretch=True, keep_ratio=True)
+            hero.add_widget(logo)
+        else:
+            hero.add_widget(Label(text="✦  AAHM  ✦", font_size="36sp", bold=True,
+                                  color=get_color_from_hex(GOLD)))
         hero.add_widget(Label(text="KURSANT İDARƏETMƏ SİSTEMİ",
                               font_size="12sp", color=get_color_from_hex(MUTED)))
         root.add_widget(hero)
@@ -401,6 +421,127 @@ class Login(Screen):
             self.manager.current = "main"
         else:
             self.message.text = "İstifadəçi adı və ya şifrə yanlışdır."
+
+
+# -------------------- BACKUP / RESTORE VIA ANDROID FILE PICKER --------------------
+class AndroidBackup:
+    REQUEST_EXPORT = 4821
+    REQUEST_IMPORT = 4822
+
+    @staticmethod
+    def export_backup():
+        from jnius import autoclass
+        from android import activity
+        Intent = autoclass("android.content.Intent")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        intent.setType("application/json")
+        intent.putExtra(Intent.EXTRA_TITLE, "AAHM_kursant_backup.json")
+        intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        activity.bind(on_activity_result=AndroidBackup._on_export_result)
+        PythonActivity.mActivity.startActivityForResult(intent, AndroidBackup.REQUEST_EXPORT)
+
+    @staticmethod
+    def import_backup():
+        from jnius import autoclass
+        from android import activity
+        Intent = autoclass("android.content.Intent")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        intent.setType("application/json")
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        activity.bind(on_activity_result=AndroidBackup._on_import_result)
+        PythonActivity.mActivity.startActivityForResult(intent, AndroidBackup.REQUEST_IMPORT)
+
+    @staticmethod
+    def _unbind(callback):
+        try:
+            from android import activity
+            activity.unbind(on_activity_result=callback)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _on_export_result(request_code, result_code, intent):
+        if request_code != AndroidBackup.REQUEST_EXPORT:
+            return
+        AndroidBackup._unbind(AndroidBackup._on_export_result)
+        screen = App.get_running_app().root.get_screen("main")
+        try:
+            Activity = __import__("jnius").autoclass("android.app.Activity")
+            if intent is None or result_code != Activity.RESULT_OK:
+                screen.set_backup_status("Backup yaradılması ləğv edildi.", GOLD)
+                return
+            uri = intent.getData()
+            if uri is None:
+                raise ValueError("Fayl yeri seçilmədi.")
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            stream = PythonActivity.mActivity.getContentResolver().openOutputStream(uri)
+            if stream is None:
+                raise IOError("Backup faylı yazmaq üçün açılmadı.")
+            payload = json.dumps(load_data(), ensure_ascii=False, indent=2).encode("utf-8")
+            try:
+                for byte in payload:
+                    stream.write(int(byte))
+                stream.flush()
+            finally:
+                stream.close()
+            screen.set_backup_status(f"Backup yaradıldı: {len(load_data())} kursant.", GREEN)
+        except Exception as exc:
+            screen.set_backup_status("Backup xətası: " + str(exc)[:140], RED)
+
+    @staticmethod
+    def _on_import_result(request_code, result_code, intent):
+        if request_code != AndroidBackup.REQUEST_IMPORT:
+            return
+        AndroidBackup._unbind(AndroidBackup._on_import_result)
+        screen = App.get_running_app().root.get_screen("main")
+        try:
+            Activity = __import__("jnius").autoclass("android.app.Activity")
+            if intent is None or result_code != Activity.RESULT_OK:
+                screen.set_backup_status("Backup seçimi ləğv edildi.", GOLD)
+                return
+            uri = intent.getData()
+            if uri is None:
+                raise ValueError("Fayl seçilmədi.")
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            stream = PythonActivity.mActivity.getContentResolver().openInputStream(uri)
+            if stream is None:
+                raise IOError("Backup faylı oxunmadı.")
+            raw = bytearray()
+            try:
+                while True:
+                    value = stream.read()
+                    if value == -1:
+                        break
+                    raw.append(int(value) & 0xFF)
+                    if len(raw) > 25 * 1024 * 1024:
+                        raise ValueError("Backup faylı çox böyükdür.")
+            finally:
+                stream.close()
+            restored = json.loads(raw.decode("utf-8-sig"))
+            if not isinstance(restored, list) or any(not isinstance(x, dict) for x in restored):
+                raise ValueError("Backup formatı düzgün deyil.")
+            current = load_data()
+            known = {person_name_key(x) for x in current if person_name_key(x)}
+            added = 0
+            for person in restored:
+                key = person_name_key(person)
+                if key and key in known:
+                    continue
+                current.append(person)
+                added += 1
+                if key:
+                    known.add(key)
+            save_data(current)
+            screen.refresh()
+            screen.set_backup_status(f"Bərpa edildi: {added} yeni kursant; təkrarlar buraxıldı.", GREEN)
+        except Exception as exc:
+            screen.set_backup_status("Bərpa xətası: " + str(exc)[:140], RED)
 
 
 # -------------------- MAIN --------------------
@@ -434,9 +575,22 @@ class Main(Screen):
         scroll.add_widget(self.listing)
         root.add_widget(scroll)
 
-        add = btn("＋  WORD FAYLLARINI İDXAL ET", GREEN, height=dp(56))
+        add = btn("＋  WORD FAYLLARINI İDXAL ET", GREEN, height=dp(54))
         add.bind(on_release=lambda *_: setattr(self.manager, "current", "import"))
         root.add_widget(add)
+
+        backup_row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+        backup_out = btn("BACKUP YARAT", BLUE, height=dp(46))
+        backup_out.bind(on_release=self.create_backup)
+        backup_in = btn("BACKUP-DAN BƏRPA ET", PANEL2, height=dp(46))
+        backup_in.bind(on_release=self.restore_backup)
+        backup_row.add_widget(backup_out)
+        backup_row.add_widget(backup_in)
+        root.add_widget(backup_row)
+        self.backup_status = Label(text="Backup faylını başqa telefona göndərərək kursantları köçürə bilərsiniz.",
+                                   color=get_color_from_hex(MUTED), font_size="11sp",
+                                   size_hint_y=None, height=dp(34))
+        root.add_widget(self.backup_status)
         self.add_widget(root)
 
     def on_enter(self, *_):
@@ -462,6 +616,28 @@ class Main(Screen):
             self.listing.add_widget(Label(text="Siyahı boşdur. Word fayllarını idxal edin.",
                                           color=get_color_from_hex(MUTED),
                                           size_hint_y=None, height=dp(70)))
+
+    def set_backup_status(self, message, color=MUTED):
+        self.backup_status.text = message
+        self.backup_status.color = get_color_from_hex(color)
+
+    def create_backup(self, *_):
+        if platform != "android":
+            self.set_backup_status("Backup fayl seçicisi Android-də işləyir.", GOLD)
+            return
+        try:
+            AndroidBackup.export_backup()
+        except Exception as exc:
+            self.set_backup_status("Backup açıla bilmədi: " + str(exc)[:120], RED)
+
+    def restore_backup(self, *_):
+        if platform != "android":
+            self.set_backup_status("Backup fayl seçicisi Android-də işləyir.", GOLD)
+            return
+        try:
+            AndroidBackup.import_backup()
+        except Exception as exc:
+            self.set_backup_status("Bərpa açıla bilmədi: " + str(exc)[:120], RED)
 
     def open_person(self, person):
         self.manager.get_screen("detail").show_person(person)
@@ -610,15 +786,9 @@ class Import(Screen):
         for path in list(self.selected_paths):
             try:
                 person = parse_docx(path)
-                fin = str(person.get("fin", "")).strip().casefold()
-                duplicate = any(
-                    (fin and str(old.get("fin", "")).strip().casefold() == fin)
-                    or (
-                        str(old.get("adi", "")).casefold() == str(person.get("adi", "")).casefold()
-                        and str(old.get("soyadi", "")).casefold() == str(person.get("soyadi", "")).casefold()
-                        and str(old.get("dogum_tarixi", "")) == str(person.get("dogum_tarixi", ""))
-                    )
-                    for old in data
+                full_name_key = person_name_key(person)
+                duplicate = bool(full_name_key) and any(
+                    person_name_key(old) == full_name_key for old in data
                 )
                 if duplicate:
                     skipped += 1
@@ -667,9 +837,12 @@ class Detail(Screen):
         scroll.add_widget(self.rows)
         root.add_widget(scroll)
 
-        export_button = btn("WORD ARAYIŞ-MƏRUZƏSİ YARAT", GOLD, "#101827", dp(54))
+        export_button = btn("WORD ARAYIŞ-MƏRUZƏSİ YARAT", GOLD, "#101827", dp(50))
         export_button.bind(on_release=self.export)
         root.add_widget(export_button)
+        delete_button = btn("KURSANTI SİYAHIDAN SİL", "#74343C", height=dp(48))
+        delete_button.bind(on_release=self.delete_person)
+        root.add_widget(delete_button)
         self.status = Label(text="", color=get_color_from_hex(MUTED),
                             size_hint_y=None, height=dp(46), font_size="11sp")
         root.add_widget(self.status)
@@ -708,6 +881,30 @@ class Detail(Screen):
             row.add_widget(right)
             self.rows.add_widget(row)
         self.status.text = ""
+
+    def delete_person(self, *_):
+        current_key = person_name_key(self.person)
+        data = load_data()
+        # Delete only the selected record matching all three name fields.
+        new_data = []
+        removed = False
+        for person in data:
+            if not removed and current_key and person_name_key(person) == current_key:
+                removed = True
+                continue
+            new_data.append(person)
+        if not removed:
+            self.status.color = get_color_from_hex(RED)
+            self.status.text = "Kursant siyahıda tapılmadı; silinmədi."
+            return
+        try:
+            save_data(new_data)
+        except Exception as exc:
+            self.status.color = get_color_from_hex(RED)
+            self.status.text = "Silinmə xətası: " + str(exc)[:100]
+            return
+        self.manager.get_screen("main").refresh()
+        self.manager.current = "main"
 
     def export(self, *_):
         try:
