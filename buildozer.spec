@@ -9,8 +9,8 @@ source.include_exts = py,png,jpg,jpeg,kv,atlas,json,docx
 version = 0.1
 
 requirements = python3,kivy
-
 icon.filename = %(source.dir)s/aahm_logo.png
+android.presplash.filename = %(source.dir)s/aahm_logo.png
 
 orientation = portrait
 fullscreen = 0
