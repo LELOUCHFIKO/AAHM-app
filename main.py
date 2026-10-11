@@ -399,25 +399,91 @@ def _xml_escape(value):
 
 
 def write_docx(path, title, rows):
-    """Write a basic Office Open XML document without python-docx/lxml."""
-    def para(text, title_style=False):
-        ppr = '<w:pPr><w:pStyle w:val="Title"/></w:pPr>' if title_style else ""
-        return '<w:p>' + ppr + '<w:r><w:t xml:space="preserve">' + _xml_escape(text) + '</w:t></w:r></w:p>'
+    """Create a Word report with the AAHM sample's numbered left side and metadata on the right."""
+    def esc(value):
+        return _xml_escape(value)
 
-    tr = ['<w:tr><w:tc><w:p><w:r><w:t>Parametr</w:t></w:r></w:p></w:tc>'
-          '<w:tc><w:p><w:r><w:t>Məlumat</w:t></w:r></w:p></w:tc></w:tr>']
+    def run(text, bold=False, size=20):
+        rpr = '<w:rPr>' + ('<w:b/>' if bold else '') + f'<w:sz w:val="{size}"/></w:rPr>'
+        return '<w:r>' + rpr + '<w:t xml:space="preserve">' + esc(text) + '</w:t></w:r>'
+
+    def para(text='', bold=False, size=20, align=None):
+        ppr = '<w:pPr>' + (f'<w:jc w:val="{align}"/>' if align else '') + '<w:spacing w:after="40"/></w:pPr>'
+        return '<w:p>' + ppr + run(text, bold, size) + '</w:p>'
+
+    # Export code passes the extra template-side fields after the numbered 54 fields.
+    side_values = {}
+    main_rows = []
     for label, value in rows:
-        tr.append('<w:tr><w:tc>' + para(label) + '</w:tc><w:tc>' + para(value) + '</w:tc></w:tr>')
+        if label in ('Kurs', 'Tabor', 'Bölük', 'Taqım', 'Tağım', 'Qrup', 'Yaxa №', 'Hadisə haqqında məlumat'):
+            side_values[label] = value
+        elif label == 'SƏNƏDDƏN OXUNAN TAM MƏTN (EHTİYAT)':
+            pass
+        elif label or value:
+            main_rows.append((label, value))
 
+    # Place the extra template fields beside the same numbered rows as in the sample.
+    side_by_row = {
+        14: [('Kurs', side_values.get('Kurs', ''))],
+        15: [('Tabor', side_values.get('Tabor', '')), ('Bölük', side_values.get('Bölük', ''))],
+        16: [('Tağım', side_values.get('Taqım', side_values.get('Tağım', ''))), ('Qrup', side_values.get('Qrup', ''))],
+        17: [('Yaxa №', side_values.get('Yaxa №', ''))],
+        23: [('Hadisə haqqında məlumat', side_values.get('Hadisə haqqında məlumat', ''))],
+    }
+
+    def cell(text, width, bold=False, fill=None, size=19):
+        shd = f'<w:shd w:fill="{fill}"/>' if fill else ''
+        tcpr = f'<w:tcPr><w:tcW w:w="{width}" w:type="dxa"/>{shd}<w:vAlign w:val="center"/></w:tcPr>'
+        return '<w:tc>' + tcpr + para(text, bold, size) + '</w:tc>'
+
+    def row(cells, header=False):
+        return '<w:tr>' + ''.join(cells) + '</w:tr>'
+
+    # Portrait page; compact 4-column grid keeps the report close to the provided form.
+    widths = [3300, 2300, 2600, 2300]
+    table_rows = []
+    table_rows.append(row([
+        cell('Məlumat sahəsi', widths[0], True, 'DCE6F1', 19),
+        cell('Məlumat', widths[1], True, 'DCE6F1', 19),
+        cell('Əlavə sahə', widths[2], True, 'DCE6F1', 19),
+        cell('Məlumat', widths[3], True, 'DCE6F1', 19),
+    ], True))
+    for idx, (label, value) in enumerate(main_rows, 1):
+        side = side_by_row.get(idx, [])
+        # A row can show two related fields on the right; join them if necessary.
+        if len(side) > 1:
+            right_label = side[0][0] + '\n' + side[1][0]
+            right_value = (side[0][1] or '—') + '\n' + (side[1][1] or '—')
+        elif side:
+            right_label, right_value = side[0]
+        else:
+            right_label, right_value = '', ''
+        table_rows.append(row([
+            cell(label, widths[0], True, 'F1F5F9', 18),
+            cell(value or '—', widths[1], False, None, 18),
+            cell(right_label, widths[2], True, 'F1F5F9', 17),
+            cell(right_value or ('—' if right_label else ''), widths[3], False, None, 17),
+        ]))
+
+    # Any extra source text remains included at the end, not discarded.
+    raw_text = ''
+    for label, value in rows:
+        if label == 'SƏNƏDDƏN OXUNAN TAM MƏTN (EHTİYAT)':
+            raw_text = value
+    if raw_text:
+        table_rows.append(row([cell('Sənəddən oxunan əlavə mətn', sum(widths), True, 'DCE6F1', 19)]))
+        table_rows.append(row([cell(raw_text, sum(widths), False, None, 18)]))
+
+    borders = ''.join(f'<w:{edge} w:val="single" w:sz="4" w:space="0" w:color="AAB7C4"/>' for edge in ('top','left','bottom','right','insideH','insideV'))
+    grid = ''.join(f'<w:gridCol w:w="{w}"/>' for w in widths)
+    title_p = '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:after="200"/></w:pPr>' + run(title, True, 32) + '</w:p>'
     docxml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
       '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
-      + para(title, True) + '<w:tbl><w:tblPr><w:tblBorders>'
-      + ''.join(f'<w:{edge} w:val="single" w:sz="4" w:space="0" w:color="808080"/>'
-                for edge in ("top","left","bottom","right","insideH","insideV"))
-      + '</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="4500"/><w:gridCol w:w="4500"/></w:tblGrid>'
-      + ''.join(tr) + '</w:tbl><w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
-      '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>'
-      '</w:body></w:document>')
+      + title_p + '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>' + borders + '</w:tblBorders>'
+      '<w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid>' + grid + '</w:tblGrid>'
+      + ''.join(table_rows) + '</w:tbl><w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+      '<w:pgMar w:top="720" w:right="500" w:bottom="720" w:left="500"/>'
+      '</w:sectPr></w:body></w:document>')
     content_types = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
       '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
@@ -431,16 +497,13 @@ def write_docx(path, title, rows):
       '</Relationships>')
     styles = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
       '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-      '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>'
-      '<w:rPr><w:sz w:val="22"/></w:rPr></w:style>'
-      '<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/>'
-      '<w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style>'
+      '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/></w:rPr></w:style>'
       '</w:styles>')
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("[Content_Types].xml", content_types)
-        z.writestr("_rels/.rels", rels)
-        z.writestr("word/document.xml", docxml)
-        z.writestr("word/styles.xml", styles)
+    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('[Content_Types].xml', content_types)
+        z.writestr('_rels/.rels', rels)
+        z.writestr('word/document.xml', docxml)
+        z.writestr('word/styles.xml', styles)
 
 
 # -------- Android native document picker (SAF), with multi-select --------
@@ -1379,7 +1442,7 @@ class Detail(Screen):
 
 class AAHMApp(App):
     def build(self):
-        self.title = "AAHM KUSANTLARIN ARAYIŞ MƏRUZƏLƏRİ"
+        self.title = "AAHM Kursant Sistemi"
         manager = ScreenManager()
         manager.add_widget(Login(name="login"))
         manager.add_widget(Main(name="main"))
