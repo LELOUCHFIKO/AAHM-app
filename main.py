@@ -399,111 +399,103 @@ def _xml_escape(value):
 
 
 def write_docx(path, title, rows):
-    """Create a Word report with the AAHM sample's numbered left side and metadata on the right."""
+    """Create the classic AAHM form: number, label, value and merged right panel."""
     def esc(value):
-        return _xml_escape(value)
+        return _xml_escape(str(value or ""))
 
-    def run(text, bold=False, size=20):
-        rpr = '<w:rPr>' + ('<w:b/>' if bold else '') + f'<w:sz w:val="{size}"/></w:rPr>'
-        return '<w:r>' + rpr + '<w:t xml:space="preserve">' + esc(text) + '</w:t></w:r>'
+    def run(text, bold=False, size=18):
+        rpr = ("<w:rPr><w:b/><w:sz w:val='%d'/></w:rPr>" % size) if bold else ("<w:rPr><w:sz w:val='%d'/></w:rPr>" % size)
+        return "<w:r>" + rpr + "<w:t xml:space='preserve'>" + esc(text) + "</w:t></w:r>"
 
-    def para(text='', bold=False, size=20, align=None):
-        ppr = '<w:pPr>' + (f'<w:jc w:val="{align}"/>' if align else '') + '<w:spacing w:after="40"/></w:pPr>'
-        return '<w:p>' + ppr + run(text, bold, size) + '</w:p>'
+    def para(text="", bold=False, size=18, align=None):
+        ppr = "<w:pPr>" + ("<w:jc w:val='%s'/>" % align if align else "") + "<w:spacing w:after='0' w:before='0'/>" + "</w:pPr>"
+        return "<w:p>" + ppr + run(text, bold, size) + "</w:p>"
 
-    # Export code passes the extra template-side fields after the numbered 54 fields.
-    side_values = {}
-    main_rows = []
-    for label, value in rows:
-        if label in ('Kurs', 'Tabor', 'Bölük', 'Taqım', 'Tağım', 'Qrup', 'Yaxa №', 'Hadisə haqqında məlumat'):
-            side_values[label] = value
-        elif label == 'SƏNƏDDƏN OXUNAN TAM MƏTN (EHTİYAT)':
-            pass
-        elif label or value:
-            main_rows.append((label, value))
+    def cell(text="", width=500, bold=False, fill=None, vmerge=None, size=18, align=None):
+        props = "<w:tcPr><w:tcW w:w='%d' w:type='dxa'/>" % width
+        if fill:
+            props += "<w:shd w:fill='%s'/>" % fill
+        if vmerge:
+            props += "<w:vMerge w:val='%s'/>" % vmerge
+        props += "</w:tcPr>"
+        return "<w:tc>" + props + para(text, bold, size, align) + "</w:tc>"
 
-    # Place the extra template fields beside the same numbered rows as in the sample.
-    side_by_row = {
-        14: [('Kurs', side_values.get('Kurs', ''))],
-        15: [('Tabor', side_values.get('Tabor', '')), ('Bölük', side_values.get('Bölük', ''))],
-        16: [('Tağım', side_values.get('Taqım', side_values.get('Tağım', ''))), ('Qrup', side_values.get('Qrup', ''))],
-        17: [('Yaxa №', side_values.get('Yaxa №', ''))],
-        23: [('Hadisə haqqında məlumat', side_values.get('Hadisə haqqında məlumat', ''))],
-    }
-
-    def cell(text, width, bold=False, fill=None, size=19):
-        shd = f'<w:shd w:fill="{fill}"/>' if fill else ''
-        tcpr = f'<w:tcPr><w:tcW w:w="{width}" w:type="dxa"/>{shd}<w:vAlign w:val="center"/></w:tcPr>'
-        return '<w:tc>' + tcpr + para(text, bold, size) + '</w:tc>'
-
-    def row(cells, header=False):
-        return '<w:tr>' + ''.join(cells) + '</w:tr>'
-
-    # Portrait page; compact 4-column grid keeps the report close to the provided form.
-    widths = [3300, 2300, 2600, 2300]
+    # Keep the first 54 fields in the supplied order; metadata goes in the merged right panel.
+    field_rows = list(rows[:54])
+    while len(field_rows) < 54:
+        field_rows.append((f"{len(field_rows)+1}.", ""))
+    meta = {str(label).strip().casefold(): str(value or "").strip() for label, value in rows[54:]}
+    course_lines = [
+        "Kurs: " + meta.get("kurs", ""),
+        "Tabor: " + meta.get("tabor", ""),
+        "Bölük: " + meta.get("bölük", ""),
+        "Tağım: " + meta.get("taqım", meta.get("tağım", "")),
+        "Qrup: " + meta.get("qrup", ""),
+        "Yaxa №: " + meta.get("yaxa №", ""),
+    ]
+    event_text = meta.get("hadisə haqqında məlumat", "")
     table_rows = []
-    table_rows.append(row([
-        cell('Məlumat sahəsi', widths[0], True, 'DCE6F1', 19),
-        cell('Məlumat', widths[1], True, 'DCE6F1', 19),
-        cell('Əlavə sahə', widths[2], True, 'DCE6F1', 19),
-        cell('Məlumat', widths[3], True, 'DCE6F1', 19),
-    ], True))
-    for idx, (label, value) in enumerate(main_rows, 1):
-        side = side_by_row.get(idx, [])
-        # A row can show two related fields on the right; join them if necessary.
-        if len(side) > 1:
-            right_label = side[0][0] + '\n' + side[1][0]
-            right_value = (side[0][1] or '—') + '\n' + (side[1][1] or '—')
-        elif side:
-            right_label, right_value = side[0]
-        else:
-            right_label, right_value = '', ''
-        table_rows.append(row([
-            cell(label, widths[0], True, 'F1F5F9', 18),
-            cell(value or '—', widths[1], False, None, 18),
-            cell(right_label, widths[2], True, 'F1F5F9', 17),
-            cell(right_value or ('—' if right_label else ''), widths[3], False, None, 17),
-        ]))
+    table_rows.append("<w:tr>" + cell("№", 420, True, "D9E5F2", size=18, align="center") +
+                      cell("Məlumat sahəsi", 3500, True, "D9E5F2", size=18) +
+                      cell("Məlumat", 3000, True, "D9E5F2", size=18) +
+                      cell("Əlavə məlumat", 2400, True, "D9E5F2", size=18) + "</w:tr>")
+    for idx, item in enumerate(field_rows):
+        label, value = item
+        # Existing labels are like '1. Adı'; separate number from label for template layout.
+        match = re.match(r"\s*(\d+)\s*\.\s*(.*)", str(label))
+        number = match.group(1) if match else str(idx + 1)
+        field_label = match.group(2) if match else str(label)
+        right = ""
+        merge = None
+        # Course metadata is one tall merged cell alongside fields 14-22.
+        if idx == 13:
+            right = "\n".join(line for line in course_lines if line.strip() and not line.endswith(": "))
+            merge = "restart"
+        elif 14 <= idx <= 21:
+            merge = "continue"
+        # Event metadata is a separate merged panel from field 23 through field 54.
+        elif idx == 22:
+            right = "Hadisə haqqında məlumat:\n" + event_text
+            merge = "restart"
+        elif 23 <= idx <= 53:
+            merge = "continue"
+        cells = cell(number + ".", 420, size=17, align="center")
+        cells += cell(field_label, 3500, size=17)
+        cells += cell(value, 3000, size=17)
+        cells += cell(right, 2400, size=17, vmerge=merge)
+        table_rows.append("<w:tr>" + cells + "</w:tr>")
 
-    # Any extra source text remains included at the end, not discarded.
-    raw_text = ''
-    for label, value in rows:
-        if label == 'SƏNƏDDƏN OXUNAN TAM MƏTN (EHTİYAT)':
-            raw_text = value
-    if raw_text:
-        table_rows.append(row([cell('Sənəddən oxunan əlavə mətn', sum(widths), True, 'DCE6F1', 19)]))
-        table_rows.append(row([cell(raw_text, sum(widths), False, None, 18)]))
-
-    borders = ''.join(f'<w:{edge} w:val="single" w:sz="4" w:space="0" w:color="AAB7C4"/>' for edge in ('top','left','bottom','right','insideH','insideV'))
-    grid = ''.join(f'<w:gridCol w:w="{w}"/>' for w in widths)
-    title_p = '<w:p><w:pPr><w:jc w:val="center"/><w:spacing w:after="200"/></w:pPr>' + run(title, True, 32) + '</w:p>'
-    docxml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
-      + title_p + '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>' + borders + '</w:tblBorders>'
-      '<w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid>' + grid + '</w:tblGrid>'
-      + ''.join(table_rows) + '</w:tbl><w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
-      '<w:pgMar w:top="720" w:right="500" w:bottom="720" w:left="500"/>'
-      '</w:sectPr></w:body></w:document>')
-    content_types = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-      '<Default Extension="xml" ContentType="application/xml"/>'
-      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
-      '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
-      '</Types>')
-    rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
-      '</Relationships>')
-    styles = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-      '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-      '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/></w:rPr></w:style>'
-      '</w:styles>')
-    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
-        z.writestr('[Content_Types].xml', content_types)
-        z.writestr('_rels/.rels', rels)
-        z.writestr('word/document.xml', docxml)
-        z.writestr('word/styles.xml', styles)
+    borders = "<w:tblBorders>" + "".join(
+        "<w:%s w:val='single' w:sz='5' w:space='0' w:color='6F7782'/>" % edge
+        for edge in ("top", "left", "bottom", "right", "insideH", "insideV")) + "</w:tblBorders>"
+    tblpr = "<w:tblPr><w:tblW w:w='0' w:type='auto'/>" + borders + "<w:tblLayout w:type='fixed'/></w:tblPr>"
+    grid = "<w:tblGrid>" + "".join("<w:gridCol w:w='%d'/>" % w for w in (420, 3500, 3000, 2400)) + "</w:tblGrid>"
+    title_para = "<w:p><w:pPr><w:jc w:val='center'/><w:spacing w:after='120' w:before='0'/></w:pPr>" + run(title, True, 28) + "</w:p>"
+    docxml = ("<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
+      "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:body>" +
+      title_para + "<w:tbl>" + tblpr + grid + "".join(table_rows) + "</w:tbl>" +
+      "<w:sectPr><w:pgSz w:w='11906' w:h='16838'/><w:pgMar w:top='720' w:right='720' w:bottom='720' w:left='720'/></w:sectPr>"
+      "</w:body></w:document>")
+    content_types = ("<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
+      "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>"
+      "<Default Extension='rels' ContentType='application/vnd.openxmlformats-package.relationships+xml'/>"
+      "<Default Extension='xml' ContentType='application/xml'/>"
+      "<Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml'/>"
+      "<Override PartName='/word/styles.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml'/>"
+      "</Types>")
+    rels = ("<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
+      "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>"
+      "<Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument' Target='word/document.xml'/>"
+      "</Relationships>")
+    styles = ("<?xml version='1.0' encoding='UTF-8' standalone='yes'?>"
+      "<w:styles xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'>"
+      "<w:style w:type='paragraph' w:default='1' w:styleId='Normal'><w:name w:val='Normal'/><w:rPr><w:rFonts w:ascii='Arial' w:hAnsi='Arial'/><w:sz w:val='18'/></w:rPr></w:style>"
+      "</w:styles>")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", content_types)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", docxml)
+        z.writestr("word/styles.xml", styles)
 
 
 # -------- Android native document picker (SAF), with multi-select --------
@@ -1407,9 +1399,6 @@ class Detail(Screen):
                 ("Kurs", "kurs"), ("Tabor", "tabor"), ("Bölük", "boluk"),
                 ("Taqım", "taqim"), ("Qrup", "qrup"), ("Yaxa №", "yaxa_no"),
                 ("Hadisə haqqında məlumat", "hadise")]])
-            raw_source = str(self.person.get("sened_elave_metn", "") or "").strip()
-            if raw_source:
-                rows.extend([("", ""), ("SƏNƏDDƏN OXUNAN TAM MƏTN (EHTİYAT)", raw_source)])
             write_docx(temp_path, "ARAYIŞ-MƏRUZƏ", rows)
             # Fail early with a clear message if the generated DOCX package is invalid.
             with zipfile.ZipFile(temp_path, "r") as docx_check:
