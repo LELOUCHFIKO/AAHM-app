@@ -9,6 +9,7 @@ import re
 import json
 import shutil
 import traceback
+import datetime
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -31,6 +32,33 @@ DOCX_AVAILABLE = True
 DOCX_ERROR = ""
 
 Window.clearcolor = get_color_from_hex("#08111F")
+
+
+def write_log(message, exc=None):
+    """Write a durable diagnostic log inside the app's private storage."""
+    try:
+        app = App.get_running_app()
+        folder = app.user_data_dir if app else os.path.dirname(os.path.abspath(__file__))
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, "aahm.log")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n[{}] {}\n".format(datetime.datetime.now().isoformat(timespec="seconds"), message))
+            if exc is not None:
+                f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    except Exception:
+        pass
+
+
+def dark_input(widget):
+    """Apply the app's dark palette to Kivy TextInput widgets."""
+    widget.background_normal = ""
+    widget.background_active = ""
+    widget.background_color = get_color_from_hex(PANEL2)
+    widget.foreground_color = get_color_from_hex(WHITE)
+    widget.cursor_color = get_color_from_hex(GOLD)
+    widget.hint_text_color = get_color_from_hex(MUTED)
+    widget.selection_color = (0.23, 0.42, 0.68, 0.8)
+    return widget
 
 BG = "#08111F"
 PANEL = "#111F33"
@@ -274,15 +302,24 @@ def write_docx(path, title, rows):
       '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
       '<Default Extension="xml" ContentType="application/xml"/>'
       '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
       '</Types>')
     rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
       '</Relationships>')
+    styles = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+      '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>'
+      '<w:rPr><w:sz w:val="22"/></w:rPr></w:style>'
+      '<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/>'
+      '<w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style>'
+      '</w:styles>')
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", content_types)
         z.writestr("_rels/.rels", rels)
         z.writestr("word/document.xml", docxml)
+        z.writestr("word/styles.xml", styles)
 
 
 # -------- Android native document picker (SAF), with multi-select --------
@@ -343,8 +380,149 @@ class AndroidDocPicker:
 
             screen.copy_selected_uris(uris)
         except Exception as exc:
+            write_log("Word faylı seçmə xətası", exc)
             screen.set_status("Fayl seçmə xətası: " + str(exc)[:160], RED)
 
+
+
+class AndroidExportPicker:
+    """Let the user choose a visible Documents/Downloads parent folder, then create
+    an 'Arayış-məruzə' subfolder and save the generated DOCX there via SAF."""
+    REQUEST_CODE = 4818
+    MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    pending_screen = None
+    pending_temp_path = None
+    pending_filename = None
+
+    @staticmethod
+    def open(screen, temp_path, filename):
+        from jnius import autoclass
+        from android import activity
+        Intent = autoclass("android.content.Intent")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        AndroidExportPicker.pending_screen = screen
+        AndroidExportPicker.pending_temp_path = temp_path
+        AndroidExportPicker.pending_filename = filename
+        intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        activity.bind(on_activity_result=AndroidExportPicker._on_result)
+        PythonActivity.mActivity.startActivityForResult(intent, AndroidExportPicker.REQUEST_CODE)
+
+    @staticmethod
+    def _on_result(request_code, result_code, intent):
+        if request_code != AndroidExportPicker.REQUEST_CODE:
+            return
+        try:
+            from android import activity
+            activity.unbind(on_activity_result=AndroidExportPicker._on_result)
+        except Exception:
+            pass
+        screen = AndroidExportPicker.pending_screen
+        temp_path = AndroidExportPicker.pending_temp_path
+        filename = AndroidExportPicker.pending_filename
+        try:
+            Activity = __import__("jnius").autoclass("android.app.Activity")
+            if result_code != Activity.RESULT_OK or intent is None:
+                if screen:
+                    screen.status.color = get_color_from_hex(GOLD)
+                    screen.status.text = "Qovluq seçimi ləğv edildi; Word faylı saxlanmadı."
+                return
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            resolver = PythonActivity.mActivity.getContentResolver()
+            DocumentsContract = autoclass("android.provider.DocumentsContract")
+            tree_uri = intent.getData()
+            # Retain permission for future Android access when supported.
+            try:
+                PythonActivity.mActivity.getContentResolver().takePersistableUriPermission(
+                    tree_uri, IntentFlags.read_write())
+            except Exception:
+                pass
+            tree_id = DocumentsContract.getTreeDocumentId(tree_uri)
+            parent_uri = DocumentsContract.buildDocumentUriUsingTree(tree_uri, tree_id)
+            folder_uri = None
+            children_uri = DocumentsContract.buildChildDocumentsUriUsingTree(tree_uri, tree_id)
+            cursor = resolver.query(children_uri, None, None, None, None)
+            if cursor is not None:
+                try:
+                    name_col = cursor.getColumnIndex("_display_name")
+                    id_col = cursor.getColumnIndex("document_id")
+                    while cursor.moveToNext():
+                        if cursor.getString(name_col) == "Arayış-məruzə":
+                            folder_uri = DocumentsContract.buildDocumentUriUsingTree(
+                                tree_uri, cursor.getString(id_col))
+                            break
+                finally:
+                    cursor.close()
+            if folder_uri is None:
+                folder_uri = DocumentsContract.createDocument(
+                    resolver, parent_uri, "vnd.android.document/directory", "Arayış-məruzə")
+            if folder_uri is None:
+                raise IOError("Arayış-məruzə qovluğu yaradıla bilmədi.")
+            # Replace an existing file with the same name so repeated exports update it.
+            child_uri = DocumentsContract.buildChildDocumentsUriUsingTree(
+                tree_uri, DocumentsContract.getDocumentId(folder_uri))
+            cursor = resolver.query(child_uri, None, None, None, None)
+            if cursor is not None:
+                try:
+                    name_col = cursor.getColumnIndex("_display_name")
+                    id_col = cursor.getColumnIndex("document_id")
+                    while cursor.moveToNext():
+                        if cursor.getString(name_col) == filename:
+                            old_uri = DocumentsContract.buildDocumentUriUsingTree(
+                                tree_uri, cursor.getString(id_col))
+                            DocumentsContract.deleteDocument(resolver, old_uri)
+                            break
+                finally:
+                    cursor.close()
+            file_uri = DocumentsContract.createDocument(resolver, folder_uri,
+                                                        AndroidExportPicker.MIME, filename)
+            if file_uri is None:
+                raise IOError("Word faylı yaradıla bilmədi.")
+            source = open(temp_path, "rb")
+            output = resolver.openOutputStream(file_uri, "w")
+            if output is None:
+                source.close()
+                raise IOError("Faylı seçilmiş qovluğa yazmaq olmadı.")
+            try:
+                while True:
+                    chunk = source.read(8192)
+                    if not chunk:
+                        break
+                    # Stream bytes individually for compatibility with PyJNIus Java arrays.
+                    for byte_value in chunk:
+                        output.write(int(byte_value) & 0xFF)
+                output.flush()
+            finally:
+                source.close()
+                output.close()
+            if screen:
+                screen.status.color = get_color_from_hex(GREEN)
+                screen.status.text = "Saxlanıldı: Arayış-məruzə/" + filename
+        except Exception as exc:
+            write_log("Word faylını telefona saxlamaq alınmadı", exc)
+            if screen:
+                screen.status.color = get_color_from_hex(RED)
+                screen.status.text = "Saxlama xətası: " + str(exc)[:130]
+        finally:
+            try:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
+            AndroidExportPicker.pending_screen = None
+            AndroidExportPicker.pending_temp_path = None
+            AndroidExportPicker.pending_filename = None
+
+
+class IntentFlags:
+    @staticmethod
+    def read_write():
+        from jnius import autoclass
+        Intent = autoclass("android.content.Intent")
+        return Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
 
 def copy_android_uri(uri, destination):
     """Copy SAF content:// URI into a normal app-private .docx file."""
@@ -389,7 +567,7 @@ class Login(Screen):
                          allow_stretch=True, keep_ratio=True)
             hero.add_widget(logo)
         else:
-            hero.add_widget(Label(text="✦  AAHM  ✦", font_size="36sp", bold=True,
+            hero.add_widget(Label(text="AAHM", font_size="36sp", bold=True,
                                   color=get_color_from_hex(GOLD)))
         hero.add_widget(Label(text="KURSANT İDARƏETMƏ SİSTEMİ",
                               font_size="12sp", color=get_color_from_hex(MUTED)))
@@ -397,17 +575,17 @@ class Login(Screen):
         root.add_widget(Label(text="İdarəetmə panelinə xoş gəlmisiniz",
                               color=get_color_from_hex(WHITE), size_hint_y=None, height=dp(42)))
 
-        self.username = TextInput(hint_text="İstifadəçi adı", multiline=False,
-                                  size_hint_y=None, height=dp(50))
-        self.password = TextInput(hint_text="Şifrə", password=True, multiline=False,
-                                  size_hint_y=None, height=dp(50))
+        self.username = dark_input(TextInput(hint_text="İstifadəçi adı", multiline=False,
+                                  size_hint_y=None, height=dp(50)))
+        self.password = dark_input(TextInput(hint_text="Şifrə", password=True, multiline=False,
+                                  size_hint_y=None, height=dp(50)))
         root.add_widget(self.username)
         root.add_widget(self.password)
 
         self.message = Label(text="", color=get_color_from_hex(RED),
                              size_hint_y=None, height=dp(32))
         root.add_widget(self.message)
-        login_btn = btn("DAXİL OL  →", GOLD, "#101827", dp(54))
+        login_btn = btn("DAXİL OL", GOLD, "#101827", dp(54))
         login_btn.bind(on_release=self.login)
         root.add_widget(login_btn)
         root.add_widget(Label(text="Sınaq giriş: admin / admin",
@@ -450,7 +628,10 @@ class AndroidBackup:
         PythonActivity = autoclass("org.kivy.android.PythonActivity")
         intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
         intent.addCategory(Intent.CATEGORY_OPENABLE)
-        intent.setType("application/json")
+        # Some Android file providers hide .json files when MIME is application/json.
+        # Use a wildcard picker and validate the selected file contents below.
+        intent.setType("*/*")
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, ["application/json", "text/json", "text/plain", "application/octet-stream"])
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         activity.bind(on_activity_result=AndroidBackup._on_import_result)
         PythonActivity.mActivity.startActivityForResult(intent, AndroidBackup.REQUEST_IMPORT)
@@ -485,7 +666,7 @@ class AndroidBackup:
             payload = json.dumps(load_data(), ensure_ascii=False, indent=2).encode("utf-8")
             try:
                 for byte in payload:
-                    stream.write(int(byte))
+                    stream.write(int(byte) & 0xFF)
                 stream.flush()
             finally:
                 stream.close()
@@ -524,8 +705,11 @@ class AndroidBackup:
             finally:
                 stream.close()
             restored = json.loads(raw.decode("utf-8-sig"))
+            # Accept the original list format and common wrapped backup formats.
+            if isinstance(restored, dict):
+                restored = restored.get("kursantlar", restored.get("data", restored.get("students")))
             if not isinstance(restored, list) or any(not isinstance(x, dict) for x in restored):
-                raise ValueError("Backup formatı düzgün deyil.")
+                raise ValueError("Backup JSON formatı uyğun deyil. AAHM backup JSON faylını seçin.")
             current = load_data()
             known = {person_name_key(x) for x in current if person_name_key(x)}
             added = 0
@@ -560,8 +744,8 @@ class Main(Screen):
         top.add_widget(logout)
         root.add_widget(top)
 
-        self.search = TextInput(hint_text="Ad, soyad və ata adı ilə axtar...",
-                                multiline=False, size_hint_y=None, height=dp(46))
+        self.search = dark_input(TextInput(hint_text="Ad, soyad və ata adı ilə axtar...",
+                                multiline=False, size_hint_y=None, height=dp(46)))
         self.search.bind(text=lambda *_: self.refresh())
         root.add_widget(self.search)
 
@@ -575,7 +759,7 @@ class Main(Screen):
         scroll.add_widget(self.listing)
         root.add_widget(scroll)
 
-        add = btn("＋  WORD FAYLLARINI İDXAL ET", GREEN, height=dp(54))
+        add = btn("WORD FAYLLARINI İDXAL ET", GREEN, height=dp(54))
         add.bind(on_release=lambda *_: setattr(self.manager, "current", "import"))
         root.add_widget(add)
 
@@ -591,7 +775,73 @@ class Main(Screen):
                                    color=get_color_from_hex(MUTED), font_size="11sp",
                                    size_hint_y=None, height=dp(34))
         root.add_widget(self.backup_status)
+        log_button = btn("LOG FAYLINI SAXLA", PANEL2, height=dp(42))
+        log_button.bind(on_release=self.export_log)
+        root.add_widget(log_button)
         self.add_widget(root)
+
+    def export_log(self, *_):
+        try:
+            path = os.path.join(App.get_running_app().user_data_dir, "aahm.log")
+            if not os.path.isfile(path):
+                write_log("Log faylı yaradıldı; tətbiq işləyir.")
+            if platform == "android":
+                from jnius import autoclass
+                from android import activity
+                Intent = autoclass("android.content.Intent")
+                PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+                intent.addCategory(Intent.CATEGORY_OPENABLE)
+                intent.setType("text/plain")
+                intent.putExtra(Intent.EXTRA_TITLE, "AAHM-log.txt")
+                activity.bind(on_activity_result=Main._on_log_result)
+                Main.pending_log_path = path
+                PythonActivity.mActivity.startActivityForResult(intent, 4899)
+            else:
+                self.set_backup_status("Log faylı: " + path, GREEN)
+        except Exception as exc:
+            write_log("Log faylını saxlamaq alınmadı", exc)
+            self.set_backup_status("Log xətası: " + str(exc)[:100], RED)
+
+    pending_log_path = None
+
+    @staticmethod
+    def _on_log_result(request_code, result_code, intent):
+        if request_code != 4899:
+            return
+        try:
+            from android import activity
+            activity.unbind(on_activity_result=Main._on_log_result)
+        except Exception:
+            pass
+        try:
+            if intent is None or Main.pending_log_path is None:
+                return
+            from jnius import autoclass
+            Activity = autoclass("android.app.Activity")
+            if result_code != Activity.RESULT_OK:
+                return
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            resolver = PythonActivity.mActivity.getContentResolver()
+            uri = intent.getData()
+            with open(Main.pending_log_path, "rb") as source:
+                output = resolver.openOutputStream(uri, "w")
+                if output is None:
+                    raise IOError("Log faylı yazıla bilmədi")
+                try:
+                    while True:
+                        chunk = source.read(4096)
+                        if not chunk:
+                            break
+                        for value in chunk:
+                            output.write(int(value) & 255)
+                    output.flush()
+                finally:
+                    output.close()
+        except Exception as exc:
+            write_log("Log ixrac xətası", exc)
+        finally:
+            Main.pending_log_path = None
 
     def on_enter(self, *_):
         self.refresh()
@@ -607,7 +857,7 @@ class Main(Screen):
             if query and query not in name.casefold():
                 continue
             count += 1
-            item = btn("👤  " + (name or "Adsız kursant") + "   ›", PANEL2, height=dp(58))
+            item = btn(" " + (name or "Adsız kursant") + "   ›", PANEL2, height=dp(58))
             item.halign = "left"
             item.bind(on_release=lambda _b, p=person: self.open_person(p))
             self.listing.add_widget(item)
@@ -669,7 +919,7 @@ class Import(Screen):
                               color=get_color_from_hex(MUTED), font_size="12sp"))
         root.add_widget(hero)
 
-        choose = btn("📂  TELEFONDAN WORD FAYLLARI SEÇ", BLUE, height=dp(54))
+        choose = btn("TELEFONDAN WORD FAYLLARI SEÇ", BLUE, height=dp(54))
         choose.bind(on_release=self.choose_files)
         root.add_widget(choose)
 
@@ -694,7 +944,7 @@ class Import(Screen):
         clear.size_hint_x = .36
         clear.bind(on_release=self.clear_files)
         actions.add_widget(clear)
-        self.import_button = btn("✓  HAMISINI ƏLAVƏ ET", GREEN, height=dp(46))
+        self.import_button = btn("HAMISINI ƏLAVƏ ET", GREEN, height=dp(46))
         self.import_button.bind(on_release=self.import_all)
         actions.add_widget(self.import_button)
         bottom.add_widget(actions)
@@ -755,7 +1005,7 @@ class Import(Screen):
             row = Panel(orientation="horizontal", padding=[dp(10), dp(6)],
                         spacing=dp(8), size_hint_y=None, height=dp(54), bg=PANEL2)
             name = os.path.basename(path)
-            label = Label(text="📄  " + name, color=get_color_from_hex(WHITE),
+            label = Label(text="DOCX: " + name, color=get_color_from_hex(WHITE),
                           font_size="12sp", halign="left", valign="middle")
             label.bind(size=lambda widget, size: setattr(widget, "text_size", size))
             row.add_widget(label)
@@ -907,18 +1157,43 @@ class Detail(Screen):
         self.manager.current = "main"
 
     def export(self, *_):
+        temp_path = None
         try:
-            folder = os.path.join(App.get_running_app().user_data_dir, "Arayislar")
+            parts = [str(self.person.get(k, "") or "").strip()
+                     for k in ("adi", "soyadi", "ata_adi")]
+            safe_parts = [re.sub(r"[\\/:*?\"<>|]+", "_", part).strip(" .")
+                          for part in parts if part]
+            filename = (" ".join(safe_parts) or "KURSANT") .upper() + ".DOCX"
+            folder = os.path.join(App.get_running_app().user_data_dir, "exports_tmp")
             os.makedirs(folder, exist_ok=True)
-            surname = re.sub(r"[^A-Za-z0-9_-]+", "_",
-                             str(self.person.get("soyadi", "Kursant"))).strip("_") or "Kursant"
-            path = os.path.join(folder, "Arayis_" + surname + ".docx")
+            temp_path = os.path.join(folder, filename)
             rows = [(DISPLAY_LABELS.get(key, key), str(value or ""))
                     for key, value in self.person.items()]
-            write_docx(path, "ARAYIŞ-MƏRUZƏ", rows)
-            self.status.color = get_color_from_hex(GREEN)
-            self.status.text = "Word faylı tətbiqin şəxsi Arayislar qovluğunda yaradıldı."
+            write_docx(temp_path, "ARAYIŞ-MƏRUZƏ", rows)
+            # Fail early with a clear message if the generated DOCX package is invalid.
+            with zipfile.ZipFile(temp_path, "r") as docx_check:
+                required = {"[Content_Types].xml", "_rels/.rels", "word/document.xml"}
+                if not required.issubset(set(docx_check.namelist())):
+                    raise ValueError("Word sənədinin daxili quruluşu natamamdır.")
+                ET.fromstring(docx_check.read("word/document.xml"))
+            if platform == "android":
+                self.status.color = get_color_from_hex(MUTED)
+                self.status.text = "Saxlanacaq yeri seçin (məsələn, Documents)."
+                AndroidExportPicker.open(self, temp_path, filename)
+            else:
+                folder = os.path.join(App.get_running_app().user_data_dir, "Arayış-məruzə")
+                os.makedirs(folder, exist_ok=True)
+                path = os.path.join(folder, filename)
+                shutil.copyfile(temp_path, path)
+                os.remove(temp_path)
+                self.status.color = get_color_from_hex(GREEN)
+                self.status.text = "Saxlanıldı: " + path
         except Exception as exc:
+            try:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
             self.status.color = get_color_from_hex(RED)
             self.status.text = "Word yaratma xətası: " + str(exc)[:150]
 
@@ -938,5 +1213,6 @@ class AAHMApp(App):
 if __name__ == "__main__":
     try:
         AAHMApp().run()
-    except Exception:
+    except Exception as exc:
+        write_log("Tətbiqdə tutulmamış xəta", exc)
         traceback.print_exc()
