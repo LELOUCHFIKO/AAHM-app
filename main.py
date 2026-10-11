@@ -134,6 +134,7 @@ FIELDS = [
     ("Qrup", "qrup", ["qrup"]),
     ("Yaxa №", "yaxa_no", ["yaxa №", "yaxa no"]),
     ("Hadisə haqqında məlumat", "hadise", ["hadisə haqqında məlumat"]),
+    ("Sənəddəki tam mətn (ehtiyat)", "sened_elave_metn", ["sənəddəki tam mətn (ehtiyat)"]),
 ]
 DISPLAY_LABELS = {key: label for label, key, _ in FIELDS}
 
@@ -243,37 +244,58 @@ def _docx_blocks(path):
 
 
 def parse_docx(path):
+    """Read all visible text in the DOCX and map every known label/value pair.
+
+    Supports template rows where label and value occupy separate cells, same-cell
+    ``Label: value`` text, numbered labels, and extra text not in the standard 54 fields.
+    """
     found = {}
     aliases = alias_map()
+    raw_lines = []
 
     def match_label(text):
-        label = re.sub(r"^\d+[\.)]\s*", "", normalise(text))
+        label = re.sub(r"^\s*\d+\s*[\.)]?\s*", "", normalise(text))
+        label = label.strip(" .:-–—")
         for alias, key in aliases:
             if label == alias:
                 return key
         return None
 
+    def clean_cell(value):
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
     for kind, content in _docx_blocks(path):
-        if kind == "table":
+        if kind == "paragraph":
+            text = clean_cell(content)
+            if text:
+                raw_lines.append(text)
+                if ":" in text:
+                    label, value = text.split(":", 1)
+                    key = match_label(label)
+                    if key and value.strip():
+                        found[key] = value.strip()
+        elif kind == "table":
             for cells in content:
+                cells = [clean_cell(c) for c in cells]
+                row_text = " | ".join(c for c in cells if c)
+                if row_text:
+                    raw_lines.append(row_text)
+                # Walk each cell; values can be in the next cell or after a colon.
                 for i, raw in enumerate(cells):
                     if not raw:
                         continue
-                    label, value = raw, ""
                     if ":" in raw:
                         label, value = raw.split(":", 1)
-                        value = value.strip()
-                    key = match_label(label)
+                        key = match_label(label)
+                        if key and value.strip():
+                            found[key] = value.strip()
+                            continue
+                    key = match_label(raw)
                     if key:
-                        if not value:
-                            value = next((x.strip() for x in cells[i + 1:] if x.strip()), "")
-                        if value:
+                        value = next((c for c in cells[i + 1:] if c), "")
+                        # Don't accidentally use another label as this field's value.
+                        if value and match_label(value) is None and ":" not in value:
                             found[key] = value
-        elif ":" in content:
-            label, value = content.split(":", 1)
-            key = match_label(label)
-            if key and value.strip():
-                found[key] = value.strip()
 
     if not found.get("adi") and not found.get("soyadi"):
         raise ValueError("Adı/Soyadı tapılmadı. Word cədvəlində etiketləri yoxlayın.")
@@ -282,6 +304,8 @@ def parse_docx(path):
     found.setdefault("kurs", "Hazırlıq kursu")
     found.setdefault("tabor", "Kursant hazırlıq")
     found.setdefault("boluk", "3-cü kursant")
+    # Preserve every extracted word/number, including any template-specific text.
+    found["sened_elave_metn"] = "\n".join(raw_lines)
     return found
 
 
@@ -1146,12 +1170,19 @@ class Detail(Screen):
             if key in hidden:
                 continue
             value = self.person.get(key, "")
-            row = Panel(orientation="horizontal", padding=[dp(10), dp(7)],
-                        spacing=dp(6), size_hint_y=None, height=dp(60), bg=PANEL)
-            left = Label(text=DISPLAY_LABELS.get(key, key), color=get_color_from_hex(MUTED),
-                         font_size="12sp", size_hint_x=.46, halign="left", valign="middle")
-            right = Label(text=str(value or "—"), color=get_color_from_hex(WHITE),
-                          font_size="13sp", size_hint_x=.54, halign="left", valign="middle")
+            value_text = str(value or "—")
+            label_text = DISPLAY_LABELS.get(key, key)
+            # Longer addresses and the preserved full DOCX text need taller cards.
+            longest = max(len(label_text), len(value_text))
+            row_height = dp(76 if longest > 58 else 64 if longest > 30 else 58)
+            if key == "sened_elave_metn":
+                row_height = dp(min(320, max(120, 20 + len(value_text) * 0.22)))
+            row = Panel(orientation="horizontal", padding=[dp(12), dp(9)],
+                        spacing=dp(8), size_hint_y=None, height=row_height, bg=PANEL)
+            left = Label(text=label_text, color=get_color_from_hex(MUTED),
+                         font_size="12sp", size_hint_x=.43, halign="left", valign="middle")
+            right = Label(text=value_text, color=get_color_from_hex(WHITE),
+                          font_size="13sp", size_hint_x=.57, halign="left", valign="middle")
             left.bind(size=lambda w, s: setattr(w, "text_size", s))
             right.bind(size=lambda w, s: setattr(w, "text_size", s))
             row.add_widget(left)
@@ -1229,6 +1260,9 @@ class Detail(Screen):
                 ("Kurs", "kurs"), ("Tabor", "tabor"), ("Bölük", "boluk"),
                 ("Taqım", "taqim"), ("Qrup", "qrup"), ("Yaxa №", "yaxa_no"),
                 ("Hadisə haqqında məlumat", "hadise")]])
+            raw_source = str(self.person.get("sened_elave_metn", "") or "").strip()
+            if raw_source:
+                rows.extend([("", ""), ("SƏNƏDDƏN OXUNAN TAM MƏTN (EHTİYAT)", raw_source)])
             write_docx(temp_path, "ARAYIŞ-MƏRUZƏ", rows)
             # Fail early with a clear message if the generated DOCX package is invalid.
             with zipfile.ZipFile(temp_path, "r") as docx_check:
