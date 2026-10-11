@@ -244,50 +244,55 @@ def _docx_blocks(path):
 
 
 def parse_docx(path):
-    """Import DOCX fields robustly from paragraphs, tables, merged cells and numbered templates.
+    """Read DOCX by table position first, then labels; preserve all source text.
 
-    Keeps the complete source text as a safety net, while mapping labels such as
-    ``11. Mülki İxtisas:`` to the correct data key even when the value is in a
-    neighbouring cell or the template has merged/empty cells.
+    The supplied AAHM template has the label in cell 2 and value in cell 3,
+    and several labels (e.g. 'Yaşayış yeri') repeat for different relatives.
+    Position-based mapping prevents those repeated labels from overwriting the
+    wrong fields and reliably imports 'Mülki İxtisas'.
     """
     found = {}
     aliases = alias_map()
     raw_lines = []
     all_cells = []
+    numbered_keys = [
+        "adi", "soyadi", "ata_adi", "dogum_tarixi", "fin", "pasport",
+        "doguldugu_yer", "yasayis_yeri", "qeydiyyat_unvani", "qosun_novu",
+        "ixtisas", "intizam_bali", "ortalama_bali", "fiziki_hazirliq",
+        "itirdiyi_intizam_bali", "kesildiyi_fenler", "elaqe", "mekteb",
+        "qebul_bali", "qebul_tarixi", "qan_qrupu", "risk_qrupu", "siqaret",
+        "icki", "mesguliyyet", "ata", "ata_dogum_tarixi", "ata_yasayis",
+        "ata_qeydiyyat", "ata_is_yeri", "ata_elaqe", "ana", "ana_dogum_tarixi",
+        "ana_yasayis", "ana_qeydiyyat", "ana_is_yeri", "ana_elaqe", "baci",
+        "baci_dogum_tarixi", "baci_yasayis", "baci_qeydiyyat", "baci_is_yeri",
+        "baci_elaqe", "qardas", "qardas_dogum_tarixi", "qardas_yasayis",
+        "qardas_qeydiyyat", "qardas_is_yeri", "qardas_elaqe", "vefat",
+        "bosanma", "aile_statusu", "xestelikler", "travmalar"
+    ]
 
     def match_label(text):
         text = str(text or "")
-        # Drop numbering and normalize punctuation/spacing around labels.
         label = re.sub(r"^\s*\d+\s*[.)]?\s*", "", normalise(text)).strip(" .:-–—\t")
         for alias, key in aliases:
-            if label == alias:
+            if label == alias or (label.startswith(alias) and
+                                  (len(label) == len(alias) or label[len(alias)] in " :\t-–—")):
                 return key
-            # Some DOCX cells append a colon, tab, or value after the label.
-            if label.startswith(alias):
-                remainder = label[len(alias):]
-                if not remainder or remainder[:1] in " :\t-–—":
-                    return key
         return None
 
-    def value_after_label(text, key):
-        value = str(text or "")
-        value = re.sub(r"^\s*\d+\s*[.)]?\s*", "", value)
-        # Remove any recognized spelling of this field label from the front.
-        nvalue = normalise(value)
-        for alias, candidate in aliases:
-            if candidate == key and nvalue.startswith(alias):
-                value = value[len(re.sub(r"^\s*\d+\s*[.)]?\s*", "", value)):] + value[len(value):] if False else value
-                # Use a case-insensitive prefix search on the original text so Azerbaijani letters survive.
-                m = re.match(r"^\s*\d+\s*[.)]?\s*", str(text or ""))
-                offset = m.end() if m else 0
-                original = str(text or "")
-                remainder = original[offset + len(alias):].lstrip(" \t:.-–—")
-                return remainder.strip()
-        if ":" in value:
-            return value.split(":", 1)[1].strip()
-        return ""
+    def clean_value(value):
+        return re.sub(r"\s+", " ", str(value or "")).strip(" \t:;|-–—")
+
+    def parse_inline(cell):
+        # Returns (key, value) when a cell contains 'Label: value'.
+        cell = str(cell or "").strip()
+        if ":" not in cell:
+            return None, ""
+        label, value = cell.split(":", 1)
+        key = match_label(label)
+        return key, clean_value(value)
 
     blocks = _docx_blocks(path)
+    table_index = 0
     for kind, content in blocks:
         if kind == "paragraph":
             text = re.sub(r"\s+", " ", str(content or "")).strip()
@@ -295,81 +300,90 @@ def parse_docx(path):
                 continue
             raw_lines.append(text)
             all_cells.append(text)
-            if ":" in text:
-                label, val = text.split(":", 1)
-                key = match_label(label)
-                if key and val.strip():
-                    found[key] = val.strip()
-        elif kind == "table":
-            for cells in content:
-                cleaned = [re.sub(r"\s+", " ", str(c or "")).strip() for c in cells]
-                all_cells.extend(cleaned)
-                row_text = " | ".join(c for c in cleaned if c)
-                if row_text:
-                    raw_lines.append(row_text)
-                for i, cell in enumerate(cleaned):
+            key, value = parse_inline(text)
+            if key and value:
+                found[key] = value
+            continue
+
+        if kind != "table":
+            continue
+        for row_index, cells in enumerate(content):
+            cleaned = [re.sub(r"\s+", " ", str(c or "")).strip() for c in cells]
+            all_cells.extend(cleaned)
+            row_text = " | ".join(c for c in cleaned if c)
+            if row_text:
+                raw_lines.append(row_text)
+
+            # Template row 0 is the title; rows 1..54 correspond exactly to fields 1..54.
+            field_number = row_index if row_index > 0 else 0
+            if field_number and field_number <= len(numbered_keys):
+                key = numbered_keys[field_number - 1]
+                # Find a non-label value cell in this row. In the AAHM file it is
+                # usually cell 3; don't accidentally take course metadata in cell 4.
+                value = ""
+                for cell in cleaned[2:]:
                     if not cell:
                         continue
-                    # Label and value in the same cell.
-                    key = None
-                    val = ""
-                    if ":" in cell:
-                        label, val = cell.split(":", 1)
-                        key = match_label(label)
-                        if key and val.strip():
-                            found[key] = val.strip()
-                            continue
-                    key = match_label(cell)
-                    if key:
-                        # Search later cells in this row, skipping blanks and labels.
-                        for candidate in cleaned[i + 1:]:
-                            if not candidate:
-                                continue
-                            if match_label(candidate):
-                                break
-                            if ":" in candidate:
-                                left, right = candidate.split(":", 1)
-                                if match_label(left):
-                                    break
-                                if right.strip():
-                                    found[key] = right.strip()
-                                    break
-                            found[key] = candidate
-                            break
+                    inline_key, inline_value = parse_inline(cell)
+                    if inline_key:
+                        # Extra metadata is parsed separately below.
+                        if inline_value:
+                            found[inline_key] = inline_value
+                        continue
+                    if match_label(cell):
+                        continue
+                    value = clean_value(cell)
+                    break
+                if value:
+                    found[key] = value
 
-    # Second pass: templates sometimes place numbered labels and values in adjacent
-    # paragraphs/rows rather than the same table row. Walk the flattened document.
-    for i, text in enumerate(all_cells):
-        key = match_label(text)
-        if not key:
-            if ":" in text:
-                label, val = text.split(":", 1)
-                key = match_label(label)
-                if key and val.strip():
-                    found[key] = val.strip()
-            continue
-        inline = value_after_label(text, key)
-        if inline:
-            found[key] = inline
-            continue
-        for candidate in all_cells[i + 1:]:
-            if not candidate:
-                continue
-            candidate_key = match_label(candidate)
-            if candidate_key:
-                break
-            if ":" in candidate:
-                label, val = candidate.split(":", 1)
-                if match_label(label):
+            # Label-driven fallback for other DOCX layouts and embedded metadata.
+            for i, cell in enumerate(cleaned):
+                if not cell:
+                    continue
+                key, inline_value = parse_inline(cell)
+                if key and inline_value:
+                    if key not in found:
+                        found[key] = inline_value
+                    continue
+                key = match_label(cell)
+                if not key:
+                    continue
+                # For label-only cells, use the next non-empty value in the same row.
+                for candidate in cleaned[i + 1:]:
+                    if not candidate:
+                        continue
+                    ckey, cvalue = parse_inline(candidate)
+                    if ckey:
+                        if cvalue and ckey not in found:
+                            found[ckey] = cvalue
+                        break
+                    if match_label(candidate):
+                        break
+                    if key not in found:
+                        found[key] = clean_value(candidate)
                     break
-                if val.strip():
-                    found[key] = val.strip()
-                    break
-            found[key] = candidate.strip()
-            break
+
+    # Parse metadata that can be packed together in the right-hand cell.
+    metadata_patterns = [
+        ("kurs", r"Kurs\s*:\s*([^\n|]+?)(?=\s+(?:Tabor|Bölük|Tağım|Taqım|Qrup|Yaxa\s*№)\s*(?::|-|$)|$)"),
+        ("tabor", r"Tabor\s*:\s*([^\n|]+?)(?=\s+(?:Kurs|Bölük|Tağım|Taqım|Qrup|Yaxa\s*№)\s*(?::|-|$)|$)"),
+        ("boluk", r"Bölük\s*:\s*([^\n|]+?)(?=\s+(?:Kurs|Tabor|Tağım|Taqım|Qrup|Yaxa\s*№)\s*(?::|-|$)|$)"),
+        ("taqim", r"(?:Tağım|Taqım)\s*:\s*([^\n|]*?)(?=\s+(?:Kurs|Tabor|Bölük|Qrup|Yaxa\s*№)\s*(?::|-|$)|$)"),
+        ("qrup", r"Qrup\s*:\s*([^\n|]+?)(?=\s+(?:Kurs|Tabor|Bölük|Tağım|Taqım|Yaxa\s*№)\s*(?::|-|$)|$)"),
+        ("yaxa_no", r"Yaxa\s*№\s*[-:]?\s*([^\n|]*?)(?=\s+(?:Kurs|Tabor|Bölük|Tağım|Taqım|Qrup)\s*(?::|-|$)|$)"),
+        ("hadise", r"Hadisə haqqında məlumat\s*:\s*([^\n|]*)"),
+    ]
+    for text in all_cells:
+        for key, pattern in metadata_patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                value = clean_value(match.group(1))
+                if value:
+                    found[key] = value
 
     if not found.get("adi") and not found.get("soyadi"):
-        raise ValueError("Adı/Soyadı tapılmadı. Word cədvəlində etiketləri yoxlayın.")
+        raise ValueError("Adı/Soyadı tapılmadı. Word sənədinin cədvəlini yoxlayın.")
     found.setdefault("adi", "Naməlum")
     found.setdefault("soyadi", "Kursant")
     found.setdefault("kurs", "Hazırlıq kursu")
@@ -1365,7 +1379,7 @@ class Detail(Screen):
 
 class AAHMApp(App):
     def build(self):
-        self.title = "AAHM Kursant Sistemi"
+        self.title = "AAHM KUSANTLARIN ARAYIŞ MƏRUZƏLƏRİ"
         manager = ScreenManager()
         manager.add_widget(Login(name="login"))
         manager.add_widget(Main(name="main"))
@@ -1380,4 +1394,3 @@ if __name__ == "__main__":
     except Exception as exc:
         write_log("Tətbiqdə tutulmamış xəta", exc)
         traceback.print_exc()
-        
