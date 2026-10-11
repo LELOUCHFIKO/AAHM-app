@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 
 from kivy.app import App
 from kivy.metrics import dp
+from kivy.clock import Clock
 from kivy.utils import get_color_from_hex, platform
 from kivy.core.window import Window
 from kivy.graphics import Color, RoundedRectangle
@@ -646,6 +647,11 @@ class AndroidBackup:
 
     @staticmethod
     def _on_export_result(request_code, result_code, intent):
+        # Android activity callbacks may arrive off the Kivy UI thread.
+        Clock.schedule_once(lambda _dt: AndroidBackup._handle_export_result(request_code, result_code, intent), 0)
+
+    @staticmethod
+    def _handle_export_result(request_code, result_code, intent):
         if request_code != AndroidBackup.REQUEST_EXPORT:
             return
         AndroidBackup._unbind(AndroidBackup._on_export_result)
@@ -676,6 +682,11 @@ class AndroidBackup:
 
     @staticmethod
     def _on_import_result(request_code, result_code, intent):
+        # UI updates and widget refreshes must run on Kivy main thread.
+        Clock.schedule_once(lambda _dt: AndroidBackup._handle_import_result(request_code, result_code, intent), 0)
+
+    @staticmethod
+    def _handle_import_result(request_code, result_code, intent):
         if request_code != AndroidBackup.REQUEST_IMPORT:
             return
         AndroidBackup._unbind(AndroidBackup._on_import_result)
