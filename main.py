@@ -100,16 +100,28 @@ FIELDS = [
     ("Sevimli məşğuliyyəti", "mesguliyyet", ["sevimli məşğuliyyəti"]),
     ("Ata", "ata", ["ata"]),
     ("Ata doğum tarixi", "ata_dogum_tarixi", ["ata doğum tarixi gün/ay/il", "ata doğum tarixi"]),
+    ("Atanın yaşayış yeri", "ata_yasayis", ["yaşayış yeri ata", "atanın yaşayış yeri"]),
+    ("Atanın qeydiyyat ünvanı", "ata_qeydiyyat", ["qeydiyyatda olduğu ünvan ata", "atanın qeydiyyat ünvanı"]),
     ("Ata iş yeri", "ata_is_yeri", ["ata iş yeri"]),
+    ("Atanın əlaqə nömrəsi", "ata_elaqe", ["əlaqə nömrəsi ata", "atanın əlaqə nömrəsi"]),
     ("Ana", "ana", ["ana"]),
     ("Ana doğum tarixi", "ana_dogum_tarixi", ["ana doğum tarixi gün,ay,il", "ana doğum tarixi"]),
+    ("Ananın yaşayış yeri", "ana_yasayis", ["yaşayış yeri ana", "ananın yaşayış yeri"]),
+    ("Ananın qeydiyyat ünvanı", "ana_qeydiyyat", ["qeydiyyatda olduğu ünvan ana", "ananın qeydiyyat ünvanı"]),
     ("Ana iş yeri", "ana_is_yeri", ["ana iş yeri"]),
+    ("Ananın əlaqə nömrəsi", "ana_elaqe", ["əlaqə nömrəsi ana", "ananın əlaqə nömrəsi"]),
     ("Bacı", "baci", ["bacı"]),
     ("Bacı doğum tarixi", "baci_dogum_tarixi", ["bacı doğum tarixi gün,ay,il", "bacı doğum tarixi"]),
+    ("Bacının yaşayış yeri", "baci_yasayis", ["yaşayış yeri bacı", "bacının yaşayış yeri"]),
+    ("Bacının qeydiyyat ünvanı", "baci_qeydiyyat", ["qeydiyyatda olduğu ünvan bacı", "bacının qeydiyyat ünvanı"]),
     ("Bacı iş yeri", "baci_is_yeri", ["bacı iş yeri"]),
+    ("Bacının əlaqə nömrəsi", "baci_elaqe", ["əlaqə nömrəsi bacı", "bacının əlaqə nömrəsi"]),
     ("Qardaş", "qardas", ["qardaş"]),
     ("Qardaş doğum tarixi", "qardas_dogum_tarixi", ["qardaş doğum tarixi gün,ay,il", "qardaş doğum tarixi"]),
+    ("Qardaşın yaşayış yeri", "qardas_yasayis", ["yaşayış yeri qardaş", "qardaşın yaşayış yeri"]),
+    ("Qardaşın qeydiyyat ünvanı", "qardas_qeydiyyat", ["qeydiyyatda olduğu ünvan qardaş", "qardaşın qeydiyyat ünvanı"]),
     ("Qardaş iş yeri", "qardas_is_yeri", ["qardaş iş yeri"]),
+    ("Qardaşın əlaqə nömrəsi", "qardas_elaqe", ["əlaqə nömrəsi qardaş", "qardaşın əlaqə nömrəsi"]),
     ("Ailədə vəfat edən", "vefat", ["ailədə vəfat edən"]),
     ("Boşanma halı (himayə)", "bosanma", ["boşanma halı (himayə)", "boşanma halı"]),
     ("Ailədə şəhid, qazi, əlillik", "aile_statusu", ["ailədə şəhid,qazi,əlillik", "ailədə şəhid, qazi, əlillik"]),
@@ -1127,9 +1139,13 @@ class Detail(Screen):
         self.rows.add_widget(header)
 
         hidden = {"adi", "soyadi", "ata_adi", "kurs", "tabor", "boluk", "taqim", "qrup"}
-        for key, value in self.person.items():
+        # Render every known field (not only keys that happen to exist in old records).
+        known_keys = [key for _label, key, _aliases in FIELDS]
+        ordered_keys = known_keys + [key for key in self.person.keys() if key not in known_keys]
+        for key in ordered_keys:
             if key in hidden:
                 continue
+            value = self.person.get(key, "")
             row = Panel(orientation="horizontal", padding=[dp(10), dp(7)],
                         spacing=dp(6), size_hint_y=None, height=dp(60), bg=PANEL)
             left = Label(text=DISPLAY_LABELS.get(key, key), color=get_color_from_hex(MUTED),
@@ -1178,8 +1194,41 @@ class Detail(Screen):
             folder = os.path.join(App.get_running_app().user_data_dir, "exports_tmp")
             os.makedirs(folder, exist_ok=True)
             temp_path = os.path.join(folder, filename)
-            rows = [(DISPLAY_LABELS.get(key, key), str(value or ""))
-                    for key, value in self.person.items()]
+            report_order = [
+                ("Adı", "adi"), ("Soyadı", "soyadi"), ("Ata adı", "ata_adi"),
+                ("Doğulduğu tarix gün,ay,il", "dogum_tarixi"), ("Vəsiqə Seriya və Fin kodu", "fin"),
+                ("Ümumvətəndaş pasport", "pasport"), ("Doğulduğu yer", "doguldugu_yer"),
+                ("Yaşayış yeri", "yasayis_yeri"), ("Qeydiyyatda olduğu ünvan", "qeydiyyat_unvani"),
+                ("Qoşun növü", "qosun_novu"), ("Mülki İxtisas", "ixtisas"),
+                ("İntizam balı", "intizam_bali"), ("Tədris ortalama balı", "ortalama_bali"),
+                ("Fiziki hazırlığı", "fiziki_hazirliq"), ("Kurs ərzində itirdiyi intizam balı", "itirdiyi_intizam_bali"),
+                ("Son semestr imtahanı ərzində kəsildiyi fənnlər", "kesildiyi_fenler"),
+                ("Əlaqə nömrəsi", "elaqe"), ("Oxuduğu məktəb və ya lisey", "mekteb"),
+                ("Hərbi İnstituta qəbul balı", "qebul_bali"), ("Hərbi İnstituta qəbul tarixi", "qebul_tarixi"),
+                ("Qan qrupu", "qan_qrupu"), ("Risk qrupu", "risk_qrupu"), ("Siqaret", "siqaret"),
+                ("İçki", "icki"), ("Sevimli məşğuliyyəti", "mesguliyyet"), ("Ata", "ata"),
+                ("Ata doğum tarixi gün/ay/il", "ata_dogum_tarixi"), ("Yaşayış yeri", "ata_yasayis"),
+                ("Qeydiyyatda olduğu ünvan", "ata_qeydiyyat"), ("Ata iş yeri", "ata_is_yeri"),
+                ("Əlaqə nömrəsi", "ata_elaqe"), ("Ana", "ana"),
+                ("Ana doğum tarixi gün,ay,il", "ana_dogum_tarixi"), ("Yaşayış yeri", "ana_yasayis"),
+                ("Qeydiyyatda olduğu ünvan", "ana_qeydiyyat"), ("Ana iş yeri", "ana_is_yeri"),
+                ("Əlaqə nömrəsi", "ana_elaqe"), ("Bacı", "baci"),
+                ("Bacı doğum tarixi gün,ay,il", "baci_dogum_tarixi"), ("Yaşayış yeri", "baci_yasayis"),
+                ("Qeydiyyatda olduğu ünvan", "baci_qeydiyyat"), ("Bacı iş yeri", "baci_is_yeri"),
+                ("Əlaqə nömrəsi", "baci_elaqe"), ("Qardaş", "qardas"),
+                ("Qardaş doğum tarixi gün/ay/il", "qardas_dogum_tarixi"), ("Yaşayış yeri", "qardas_yasayis"),
+                ("Qeydiyyatda olduğu ünvan", "qardas_qeydiyyat"), ("Qardaş iş yeri", "qardas_is_yeri"),
+                ("Əlaqə nömrəsi", "qardas_elaqe"), ("Ailədə vəfat edən", "vefat"),
+                ("Boşanma halı (himayə)", "bosanma"), ("Ailədə Şəhid,Qazi,Əlillik", "aile_statusu"),
+                ("Keçirdiyi xəstəliklər", "xestelikler"), ("Keçirdiyi travmalar", "travmalar"),
+            ]
+            rows = [(f"{i}. {label}", str(self.person.get(key, "") or ""))
+                    for i, (label, key) in enumerate(report_order, 1)]
+            # The attached template has these fields alongside the numbered 54 items.
+            rows.extend([(label, str(self.person.get(key, "") or "")) for label, key in [
+                ("Kurs", "kurs"), ("Tabor", "tabor"), ("Bölük", "boluk"),
+                ("Taqım", "taqim"), ("Qrup", "qrup"), ("Yaxa №", "yaxa_no"),
+                ("Hadisə haqqında məlumat", "hadise")]])
             write_docx(temp_path, "ARAYIŞ-MƏRUZƏ", rows)
             # Fail early with a clear message if the generated DOCX package is invalid.
             with zipfile.ZipFile(temp_path, "r") as docx_check:
