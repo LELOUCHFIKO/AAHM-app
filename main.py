@@ -244,58 +244,129 @@ def _docx_blocks(path):
 
 
 def parse_docx(path):
-    """Read all visible text in the DOCX and map every known label/value pair.
+    """Import DOCX fields robustly from paragraphs, tables, merged cells and numbered templates.
 
-    Supports template rows where label and value occupy separate cells, same-cell
-    ``Label: value`` text, numbered labels, and extra text not in the standard 54 fields.
+    Keeps the complete source text as a safety net, while mapping labels such as
+    ``11. Mülki İxtisas:`` to the correct data key even when the value is in a
+    neighbouring cell or the template has merged/empty cells.
     """
     found = {}
     aliases = alias_map()
     raw_lines = []
+    all_cells = []
 
     def match_label(text):
-        label = re.sub(r"^\s*\d+\s*[\.)]?\s*", "", normalise(text))
-        label = label.strip(" .:-–—")
+        text = str(text or "")
+        # Drop numbering and normalize punctuation/spacing around labels.
+        label = re.sub(r"^\s*\d+\s*[.)]?\s*", "", normalise(text)).strip(" .:-–—\t")
         for alias, key in aliases:
             if label == alias:
                 return key
+            # Some DOCX cells append a colon, tab, or value after the label.
+            if label.startswith(alias):
+                remainder = label[len(alias):]
+                if not remainder or remainder[:1] in " :\t-–—":
+                    return key
         return None
 
-    def clean_cell(value):
-        return re.sub(r"\s+", " ", str(value or "")).strip()
+    def value_after_label(text, key):
+        value = str(text or "")
+        value = re.sub(r"^\s*\d+\s*[.)]?\s*", "", value)
+        # Remove any recognized spelling of this field label from the front.
+        nvalue = normalise(value)
+        for alias, candidate in aliases:
+            if candidate == key and nvalue.startswith(alias):
+                value = value[len(re.sub(r"^\s*\d+\s*[.)]?\s*", "", value)):] + value[len(value):] if False else value
+                # Use a case-insensitive prefix search on the original text so Azerbaijani letters survive.
+                m = re.match(r"^\s*\d+\s*[.)]?\s*", str(text or ""))
+                offset = m.end() if m else 0
+                original = str(text or "")
+                remainder = original[offset + len(alias):].lstrip(" \t:.-–—")
+                return remainder.strip()
+        if ":" in value:
+            return value.split(":", 1)[1].strip()
+        return ""
 
-    for kind, content in _docx_blocks(path):
+    blocks = _docx_blocks(path)
+    for kind, content in blocks:
         if kind == "paragraph":
-            text = clean_cell(content)
-            if text:
-                raw_lines.append(text)
-                if ":" in text:
-                    label, value = text.split(":", 1)
-                    key = match_label(label)
-                    if key and value.strip():
-                        found[key] = value.strip()
+            text = re.sub(r"\s+", " ", str(content or "")).strip()
+            if not text:
+                continue
+            raw_lines.append(text)
+            all_cells.append(text)
+            if ":" in text:
+                label, val = text.split(":", 1)
+                key = match_label(label)
+                if key and val.strip():
+                    found[key] = val.strip()
         elif kind == "table":
             for cells in content:
-                cells = [clean_cell(c) for c in cells]
-                row_text = " | ".join(c for c in cells if c)
+                cleaned = [re.sub(r"\s+", " ", str(c or "")).strip() for c in cells]
+                all_cells.extend(cleaned)
+                row_text = " | ".join(c for c in cleaned if c)
                 if row_text:
                     raw_lines.append(row_text)
-                # Walk each cell; values can be in the next cell or after a colon.
-                for i, raw in enumerate(cells):
-                    if not raw:
+                for i, cell in enumerate(cleaned):
+                    if not cell:
                         continue
-                    if ":" in raw:
-                        label, value = raw.split(":", 1)
+                    # Label and value in the same cell.
+                    key = None
+                    val = ""
+                    if ":" in cell:
+                        label, val = cell.split(":", 1)
                         key = match_label(label)
-                        if key and value.strip():
-                            found[key] = value.strip()
+                        if key and val.strip():
+                            found[key] = val.strip()
                             continue
-                    key = match_label(raw)
+                    key = match_label(cell)
                     if key:
-                        value = next((c for c in cells[i + 1:] if c), "")
-                        # Don't accidentally use another label as this field's value.
-                        if value and match_label(value) is None and ":" not in value:
-                            found[key] = value
+                        # Search later cells in this row, skipping blanks and labels.
+                        for candidate in cleaned[i + 1:]:
+                            if not candidate:
+                                continue
+                            if match_label(candidate):
+                                break
+                            if ":" in candidate:
+                                left, right = candidate.split(":", 1)
+                                if match_label(left):
+                                    break
+                                if right.strip():
+                                    found[key] = right.strip()
+                                    break
+                            found[key] = candidate
+                            break
+
+    # Second pass: templates sometimes place numbered labels and values in adjacent
+    # paragraphs/rows rather than the same table row. Walk the flattened document.
+    for i, text in enumerate(all_cells):
+        key = match_label(text)
+        if not key:
+            if ":" in text:
+                label, val = text.split(":", 1)
+                key = match_label(label)
+                if key and val.strip():
+                    found[key] = val.strip()
+            continue
+        inline = value_after_label(text, key)
+        if inline:
+            found[key] = inline
+            continue
+        for candidate in all_cells[i + 1:]:
+            if not candidate:
+                continue
+            candidate_key = match_label(candidate)
+            if candidate_key:
+                break
+            if ":" in candidate:
+                label, val = candidate.split(":", 1)
+                if match_label(label):
+                    break
+                if val.strip():
+                    found[key] = val.strip()
+                    break
+            found[key] = candidate.strip()
+            break
 
     if not found.get("adi") and not found.get("soyadi"):
         raise ValueError("Adı/Soyadı tapılmadı. Word cədvəlində etiketləri yoxlayın.")
@@ -304,7 +375,6 @@ def parse_docx(path):
     found.setdefault("kurs", "Hazırlıq kursu")
     found.setdefault("tabor", "Kursant hazırlıq")
     found.setdefault("boluk", "3-cü kursant")
-    # Preserve every extracted word/number, including any template-specific text.
     found["sened_elave_metn"] = "\n".join(raw_lines)
     return found
 
@@ -1310,3 +1380,4 @@ if __name__ == "__main__":
     except Exception as exc:
         write_log("Tətbiqdə tutulmamış xəta", exc)
         traceback.print_exc()
+        
